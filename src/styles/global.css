@@ -1,0 +1,16 @@
+/* 主题令牌由 M13 提供（docs/15-theme-tokens.md）。
+   M01 阶段不写任何颜色/间距/字体数值，只做最基本的排版复位。 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--lg-font-ui, system-ui, sans-serif);
+}

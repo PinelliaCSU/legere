@@ -1,0 +1,82 @@
+# 18 · M01 + M02 实施报告
+
+**status: blocked**（代码与契约检查已就绪；构建与 `pdf://` 探针无法执行 —— 本机缺 Rust 工具链且无外网）
+
+## 1. 本轮完成的事
+
+1. 回填 A1–A5 五条用户决策（见 §2）。
+2. 裁决 D0 / B1–B5 / V1 及 A1–A5 未覆盖的残留（见 §3）。
+3. 落地 M01（工程骨架 + `pdf://` 协议壳 + 日志 + 错误基座 + 冒烟壳）与 M02（Rust/TS 双侧 DTO、Command 与事件注册表、IPC 客户端、契约一致性脚本）。
+
+## 2. 回填清单
+
+| 条目 | 落点 | 写入内容 |
+|---|---|---|
+| A1 | `module-prompts/13-theme-settings.md §7.2-5`、§7 第 7 条 | 用户原话照录 + 实现含义：`route = reader` 时 `SettingsPanel` 与设置入口一律不渲染、不可达；`Esc` 退出后可用 |
+| A2 | `13-theme-settings.md §7.2-6` | 「不加入过渡动效。」+ `transition: none`（不得给 CSS 变量或背景加 transition） |
+| A3 | `14-workspace-shell.md §7.3 A-3`、`16-copy-deck.md §8` | 「不做引导。」不实现引导层/气泡/遮罩/高亮提示 |
+| A4 | `14-workspace-shell.md §7.3 A-4`、`16-copy-deck.md §6` | 「作者、阅读进度。」缺作者时只显示阅读进度 |
+| A5 | `10-job-orchestrator.md §4`、`14-workspace-shell.md §7.3 A-5`、`16-copy-deck.md §8` | 「给出提示即可。」终态仍写 `error_code/error_msg` 并发事件；不做逐条原因列表或详情面板 |
+
+`TODO(ui-confirm)` / `TODO(copy)` 已在这四处清除；`16-copy-deck.md §8` 由「未收录项」改为「已裁决，无待定」。
+
+## 3. 裁决清单
+
+| 条目 | 裁决 | 依据 |
+|---|---|---|
+| D0 | 下发授权成立，按 M01 → M02 串行开工 | 用户明确「编码从 M01 + M02 骨架开始」 |
+| B1 · M05 | 除 T12 外不新增（已把 T12 两项写入 M05 §5.0） | 逐条比对 T1–T30，仅 T12 命中引擎职责 |
+| B2 · M06 | **回灌 T16**（LOD 预览；>200% 禁止拉伸） | T16 定义 `PageRenderState.scale` 语义（契约 R5），是 M06 实现参数 |
+| B3 · M08 | 不新增 | 其待确认项均属视觉，已由 D21/D22 覆盖 |
+| B4 · M09 | 不新增 | T19 属检索侧，已回灌 M11 |
+| B5 · T12 | 拆两处：密码框 + 旋转页 → M05；页面热区 → M07 | 三小项分属引擎与交互职责 |
+| V1 | **(a) 推迟到 M13/M14 首次出界面时验证** | 边界条件禁止引入决策外的新需求；(b) 的令牌预览页属新增需求 |
+| M13 残留 | 默认主题 `light`；跟随系统但仅首次 | 沿用 M13 占位值；T13 已登记 |
+| M01 残留 | 标题 `Legere` / 1280×860 / 最小 960×640；不做启动画面；冒烟 UI 仅 dev；日志目录固定、级别由 `LEGERE_LOG` 调 | 均为最小假设，单点可改；详见 `14-ui-decision-register.md §4.2` |
+
+## 4. 代码：已完成
+
+**M01（12 个 Rust 文件 + 6 个前端/配置文件）**
+
+- `src-tauri/src/lib.rs`：装配日志、`app://ready`、`pdf://` 协议、`invoke_handler`。
+- `src-tauri/src/protocol/{mod,range}.rs`：Range 判定按契约 R15（语法非法 400 / `start >= size` 416 + `bytes */size` / `end` 越界夹取 206 / 跨度 > 8 MiB 截断 206）；URI 同时接受 `pdf://doc/N` 与 `http://pdf.localhost/doc/N`（V-06 未定时不假设单一形态）。
+- `src-tauri/src/logging.rs`：`tracing` + 每日滚动 + 7 天清理 + `LEGERE_LOG`。
+- `src-tauri/src/error.rs`：`ApiError`/`ApiErrorCode`(12) + `DomainError` → `ApiError` 映射。
+- `src-tauri/src/commands/mod.rs`：`ping`、`app_info`（占位值显式标注，`ftsEnabled=false`、`textEngine=none`，不伪装就绪）。
+- `src-tauri/assets/sample.pdf`：脚本生成的 603 字节合法 PDF，xref 偏移自校验通过。
+
+**M02（9 个 TS/RS 契约文件 + 1 个检查脚本）**
+
+- `src/contracts/{errors,types,cmd,evt,index}.ts`：12 错误码 + 文案表、18 个 DTO、28 条 Command、5 个事件。
+- `src-tauri/src/contracts/{dto,cmd,evt}.rs`：与 TS 逐字段镜像（`serde(rename_all="camelCase")`，错误码与枚举显式 rename）。
+- `src/core/ipc.ts`：`call<T>`（超时 + `ApiError` 归一化）、`subscribe`（同事件订阅去重）。
+- `scripts/check-contracts.mjs`：纯 Node，比对 DTO 字段 / Command 名 / 错误码三组。
+
+## 5. 验证证据
+
+```text
+$ node scripts/make-sample-pdf.mjs
+sample.pdf 已生成: ...\src-tauri\assets\sample.pdf (603 bytes, 5 objects, xref @ 416)
+
+$ node scripts/check-contracts.mjs   # exit 0
+比对 DTO 类型数: 18
+Command: TS 28 / Rust 28
+错误码: TS 12 / Rust 12
+契约一致 ✓
+```
+
+## 6. 未验证（阻塞项，必须补齐后才可宣称 M01 验收通过）
+
+| 项 | 原因 | 补齐方式 |
+|---|---|---|
+| `cargo build` / `cargo test`（含 `range.rs` 8 条单测） | 本机 **无 cargo/rustc**（`Get-Command` 确认缺失，`%USERPROFILE%\.cargo\bin` 不存在） | 安装 Rust stable 后执行 `cd src-tauri && cargo test` |
+| `pdf://` 的 206 + Range 实测（本轮验证目标 ①） | 依赖构建产物 + 运行中的应用；且 V-06 的真实 URL 形态未测 | 装好工具链后按 M01 §11 步骤 1 的探针执行，回填 `docs/02 §1` 的 V-06 |
+| `pnpm install` / `tsc --noEmit` / `vite build` | 本机 **无外网**（`registry.npmjs.org` 连接失败） | 有网后执行 `pnpm install && pnpm typecheck` |
+| 45 个色值的真实界面观感（本轮验证目标 ②） | 按 V1 裁决 (a) 推迟到 M13/M14 | 不属 M01/M02 的验收范围 |
+
+## 7. 对后续模块的影响
+
+- M03/M04/M09 接入后，须把 `commands::app_info` 的占位值替换为真实能力（`ftsEnabled`/`contentlessDelete`/`textEngine`）。
+- `invoke_handler` 目前只注册 `ping`/`app_info` 两条；M02 的「注册集合 == `CMD` 集合」验收要等全部模块落地，属**计划内阶段缺口**，不得当作已通过。
+- `lib.rs` 的 `pdf://` handler 现返回内置样本；M04 提供 `DocumentPathResolver` 后替换为真实文件读取。
+- 冒烟壳 `src/App.tsx` 在 M14 接入 `AppShell` 时删除。
