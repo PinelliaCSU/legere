@@ -49,8 +49,12 @@ pub fn run() {
         .setup(|app| {
             let candidates = data_dir_candidates(app.handle());
 
-            // 日志目录：候选目录下的 logs/，依次尝试；全部失败也不 panic（只是没有文件日志）。
-            let log_candidates: Vec<PathBuf> = candidates.iter().map(|d| d.join("logs")).collect();
+            // 日志目录候选：LEGERE_LOG_DIR 优先，其次各数据目录下的 logs/；全部失败也不 panic。
+            let mut log_candidates: Vec<PathBuf> = Vec::new();
+            if let Some(dir) = std::env::var_os("LEGERE_LOG_DIR") {
+                log_candidates.push(PathBuf::from(dir));
+            }
+            log_candidates.extend(candidates.iter().map(|d| d.join("logs")));
             match logging::init(&log_candidates) {
                 Ok(guard) => {
                     tracing::info!(
