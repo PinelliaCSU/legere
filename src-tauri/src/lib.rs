@@ -48,6 +48,59 @@ fn data_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
     out
 }
 
+/// 依次尝试若干个 WebView2 用户数据目录来创建主窗口。
+///
+/// 全部失败时返回 (目录, 错误) 列表，供 startup-error.txt 记录。
+fn build_main_window(
+    app: &tauri::AppHandle,
+    data_dir: &std::path::Path,
+) -> Result<tauri::WebviewWindow, Vec<(String, String)>> {
+    // 1) 显式覆盖（测试 / 便携模式）2) WebView2 默认目录 3) 数据目录下的唯一目录（必然不冲突）
+    let mut candidates: Vec<(String, Option<PathBuf>)> = Vec::new();
+    if let Some(dir) = std::env::var_os("LEGERE_WEBVIEW_DATA_DIR") {
+        candidates.push((dir.to_string_lossy().to_string(), Some(PathBuf::from(dir))));
+    }
+    candidates.push(("<WebView2 默认目录>".to_string(), None));
+    // 稳定的回退目录：不用 per-pid，否则每次启动都会多出一份 57 MB 的 WebView2 配置。
+    let fallback = data_dir.join("webview-fallback");
+    candidates.push((fallback.to_string_lossy().to_string(), Some(fallback)));
+
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for (label, dir) in candidates {
+        let mut builder = tauri::WebviewWindowBuilder::new(
+            app,
+            WINDOW_LABEL,
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title(WINDOW_TITLE)
+        .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .min_inner_size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+        // app://ready 若只在 setup 里发，会早于页面订阅（实测前端显示"未收到"）。
+        // 页面加载完成后补发一次，让事件成为可靠的"已就绪"信号。
+        .on_page_load(|window, _payload| {
+            let version = commands::VERSION.to_string();
+            let _ = window.app_handle().emit(
+                contracts::evt::E_APP_READY,
+                contracts::evt::AppReadyPayload { version },
+            );
+        });
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).ok();
+            builder = builder.data_directory(dir.clone());
+        }
+        match builder.build() {
+            Ok(window) => {
+                tracing::info!(webview_data_dir = %label, "窗口已创建");
+                return Ok(window);
+            }
+            Err(err) => {
+                tracing::warn!(webview_data_dir = %label, ?err, "该 WebView2 目录建窗口失败，换下一个");
+                errors.push((label, format!("{err:?}")));
+            }
+        }
+    }
+    Err(errors)
+}
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -88,44 +141,36 @@ pub fn run() {
             app.manage(AppState::new(data_dir.clone()));
 
             // 先建窗口：即使后端全挂，用户也要看到界面与原因。
-            let mut builder = tauri::WebviewWindowBuilder::new(
-                app,
-                WINDOW_LABEL,
-                tauri::WebviewUrl::App("index.html".into()),
-            )
-            .title(WINDOW_TITLE)
-            .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-            .min_inner_size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
-            // app://ready 若只在 setup 里发，会早于页面订阅（实测前端显示"未收到"）。
-            // 页面加载完成后补发一次，让事件成为可靠的"已就绪"信号。
-            .on_page_load(|window, _payload| {
-                let version = commands::VERSION.to_string();
-                let _ = window.app_handle().emit(
-                    contracts::evt::E_APP_READY,
-                    contracts::evt::AppReadyPayload { version },
-                );
-            });
-
-            if let Some(dir) = std::env::var_os("LEGERE_WEBVIEW_DATA_DIR") {
-                std::fs::create_dir_all(&dir).ok();
-                builder = builder.data_directory(PathBuf::from(dir));
-            }
-
-            match builder.build() {
+            //
+            // 为什么这里要「多目录重试」：WebView2 的用户数据目录同一时刻只能被一个进程占用，
+            // 抢不到时 CreateWebview 直接返回 0x800700AA（ERROR_BUSY，「请求的资源在使用中」）。
+            // 以前遇到这种情况只写一个 startup-error.txt 就没有窗口了 —— 用户看到的就是
+            // 「窗口闪一下然后消失」（双击连按两次、或上一个进程的 WebView2 还没退干净都会触发）。
+            // 现在依次尝试：显式指定的目录 → WebView2 默认目录 → 数据目录下的唯一目录，
+            // 只要有一个能建出窗口，应用就能正常启动。
+            match build_main_window(app.handle(), &data_dir) {
                 Ok(_) => tracing::info!("窗口已创建"),
-                Err(err) => {
-                    tracing::error!(?err, "窗口创建失败");
-                    eprintln!("window build failed: {err:?}");
+                Err(errors) => {
+                    tracing::error!(?errors, "窗口创建失败（已尝试全部 WebView2 数据目录）");
+                    eprintln!("window build failed: {errors:?}");
                     // release 没有控制台：把原因写到 exe 同级，避免「双击后什么都没有」。
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
-                            let msg = format!("窗口创建失败: {err:?}\n数据目录: {}\n", data_dir.display());
+                            let mut msg = String::from("窗口创建失败：所有 WebView2 数据目录都不可用\n");
+                            msg.push_str(&format!("应用数据目录: {}\n\n", data_dir.display()));
+                            for (candidate, error) in &errors {
+                                msg.push_str(&format!("- {} => {}\n", candidate, error));
+                            }
+                            msg.push_str("\n处理建议：关闭其它 Legere 窗口后重试；仍失败可把 WebView2 默认目录下的 EBWebView 改名后再启动。\n");
                             let _ = std::fs::write(dir.join("startup-error.txt"), msg);
                         }
+                        // 没有窗口就不要留一个僵尸进程在后台：任务管理器里会看到一个「看不见的 Legere」，
+                        // 反而让人以为启动成功了。
+                        eprintln!("no window could be created, exiting");
+                        std::process::exit(1);
                     }
                 }
             }
-
             // 再开数据库：失败只登记错误，不阻断启动。
             let db_path = data_dir.join("legere.db");
             match db::Db::open(&db_path) {
