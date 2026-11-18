@@ -4,8 +4,12 @@
 // 元数据与正文由 M09 经 M10 的 meta/text 任务产出。
 
 pub mod scan;
+pub mod watch;
 
 pub use scan::{ensure_root_dir, scan_root, FoundFile, ScanDiff, ScanOutcome};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod watch_tests;

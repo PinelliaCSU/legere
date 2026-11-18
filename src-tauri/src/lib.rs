@@ -7,9 +7,12 @@ pub mod commands;
 pub mod contracts;
 pub mod db;
 pub mod error;
+pub mod index;
+pub mod jobs;
 pub mod library;
 pub mod logging;
 pub mod protocol;
+pub mod search;
 pub mod state;
 
 use std::path::PathBuf;
@@ -146,6 +149,35 @@ pub fn run() {
                 }
             }
 
+            // 为已启用的库根启动文件监控（触发器，真正的 diff 在 scan_root）。
+            if let Some(state) = app.try_state::<AppState>() {
+                let repos = db::repo::SqlRepos;
+                let roots = state
+                    .with_db(|db| {
+                        use db::repo::LibraryRootRepo;
+                        db.with_read(|conn| repos.list(conn))
+                    })
+                    .unwrap_or_default();
+                for root in roots.into_iter().filter(|r| r.enabled) {
+                    if let Some(watcher) = library::watch::start_watcher(
+                        app.handle().clone(),
+                        root.id,
+                        PathBuf::from(&root.path),
+                    ) {
+                        state.keep_watcher(watcher);
+                        tracing::info!(root_id = root.id, path = %root.path, "已启动文件监控");
+                    } else {
+                        tracing::warn!(root_id = root.id, path = %root.path, "文件监控启动失败");
+                    }
+                }
+            }
+
+            // 索引工作线程（M10）：随应用启动一次。
+            if let Some(state) = app.try_state::<AppState>() {
+                state.index.spawn_worker(app.handle().clone());
+                tracing::info!("索引工作线程已启动");
+            }
+
             app.emit(
                 contracts::evt::E_APP_READY,
                 contracts::evt::AppReadyPayload { version: commands::VERSION.to_string() },
@@ -215,7 +247,14 @@ pub fn run() {
             commands::library::document_get,
             commands::library::document_url,
             commands::library::document_touch_opened,
-            commands::library::document_record_delete
+            commands::library::document_record_delete,
+            commands::index::index_enqueue,
+            commands::index::index_cancel,
+            commands::index::index_status,
+            commands::index::index_pause,
+            commands::index::index_rebuild_all,
+            commands::index::search_global,
+            commands::index::search_global_count
         ])
         .run(tauri::generate_context!())
         .expect("Legere 启动失败");

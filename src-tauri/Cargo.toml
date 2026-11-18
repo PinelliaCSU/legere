@@ -25,6 +25,9 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+notify = "8.2.0"
+jieba-rs = "0.11.0"
+lopdf = "0.36.0"
 
 [features]
 # 生产构建必须启用：否则 tauri 会去加载 build.devUrl，release 里就是「localhost 拒绝连接」。

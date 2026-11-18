@@ -13,11 +13,21 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub db: Mutex<Option<Db>>,
     pub db_error: Mutex<Option<String>>,
+    /// 文件监控句柄：必须被持有，否则 watch 会随 watcher drop 立刻停止。
+    pub watchers: Mutex<Vec<notify::RecommendedWatcher>>,
+    /// 索引任务调度器（M10）。
+    pub index: std::sync::Arc<crate::jobs::IndexService>,
 }
 
 impl AppState {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir, db: Mutex::new(None), db_error: Mutex::new(None) }
+        Self {
+            data_dir,
+            db: Mutex::new(None),
+            db_error: Mutex::new(None),
+            watchers: Mutex::new(Vec::new()),
+            index: std::sync::Arc::new(crate::jobs::IndexService::new()),
+        }
     }
 
     pub fn install_db(&self, db: Db) {
@@ -29,6 +39,12 @@ impl AppState {
     pub fn set_db_error(&self, message: String) {
         if let Ok(mut slot) = self.db_error.lock() {
             *slot = Some(message);
+        }
+    }
+
+    pub fn keep_watcher(&self, watcher: notify::RecommendedWatcher) {
+        if let Ok(mut slot) = self.watchers.lock() {
+            slot.push(watcher);
         }
     }
 
