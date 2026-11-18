@@ -13,22 +13,31 @@ pub struct ProtocolResponse {
     pub body: Vec<u8>,
 }
 
-/// 从 uri 里解析 document id：同时接受 pdf://doc/17?... 与 /doc/17?... 
+/// 从 uri 里解析 document id。
+///
+/// 必须同时接受两种形态（V-06 未定前不假设单一形态）：
+///   pdf://doc/17        -> authority = "doc"，id 在路径首段
+///   http://pdf.localhost/doc/17 -> authority 是主机，id 在 "doc" 之后
 pub fn parse_document_id(uri: &str) -> Option<i64> {
-    let path = match uri.find("://") {
-        Some(idx) => {
-            let rest = &uri[idx + 3..];
-            match rest.find('/') {
-                Some(slash) => &rest[slash..],
-                None => return None,
-            }
-        }
+    let after_scheme = match uri.find("://") {
+        Some(idx) => &uri[idx + 3..],
         None => uri,
     };
+
+    let (authority, path) = match after_scheme.find('/') {
+        Some(slash) => (&after_scheme[..slash], &after_scheme[slash..]),
+        None => (after_scheme, ""),
+    };
+
     let path = path.split(['?', '#']).next().unwrap_or(path);
-    let mut segments = path.trim_start_matches('/').split('/');
-    match (segments.next(), segments.next()) {
-        (Some("doc"), Some(id)) => id.parse::<i64>().ok(),
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if authority == "doc" {
+        return segments.first().and_then(|s| s.parse::<i64>().ok());
+    }
+
+    match (segments.first(), segments.get(1)) {
+        (Some(&"doc"), Some(id)) => id.parse::<i64>().ok(),
         _ => None,
     }
 }
@@ -61,11 +70,18 @@ mod tests {
 
     #[test]
     fn document_id_from_both_uri_shapes() {
+        // 形态 A：scheme 后第一段就是 "doc"（pdf://doc/17）
         assert_eq!(parse_document_id("pdf://doc/17?v=1"), Some(17));
-        assert_eq!(parse_document_id("http://pdf.localhost/doc/17?v=1"), Some(17));
         assert_eq!(parse_document_id("pdf://doc/17"), Some(17));
+        // 形态 B：Windows 上常见的主机式 URL（pdf://pdf.localhost/doc/17）
+        assert_eq!(parse_document_id("http://pdf.localhost/doc/17?v=1"), Some(17));
+        assert_eq!(parse_document_id("http://pdf.localhost/doc/17"), Some(17));
+        // 结尾斜杠与查询串不影响
+        assert_eq!(parse_document_id("http://pdf.localhost/doc/17/?v=9"), Some(17));
+        // 非法与不匹配
         assert_eq!(parse_document_id("pdf://doc/abc"), None);
         assert_eq!(parse_document_id("pdf://other/17"), None);
+        assert_eq!(parse_document_id("pdf://doc/"), None);
         assert_eq!(parse_document_id(""), None);
     }
 
