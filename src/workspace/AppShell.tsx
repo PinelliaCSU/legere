@@ -39,6 +39,7 @@ export function AppShell(): ReactElement {
   const [addOpen, setAddOpen] = useState(false);
   const [addPath, setAddPath] = useState("");
   const [busy, setBusy] = useState("");
+  const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null);
 
 
   const refresh = useCallback(async () => {
@@ -63,13 +64,20 @@ export function AppShell(): ReactElement {
         setStatus("后端不可用：" + (e.code ?? "E_INTERNAL"));
       }
     })();
-    let dispose: (() => void) | null = null;
+    const disposers: (() => void)[] = [];
     void subscribe(EVT.LIBRARY_CHANGED, () => {
       void refresh();
-    }).then((fn) => {
-      dispose = fn;
-    });
-    return () => dispose?.();
+    }).then((fn) => disposers.push(fn));
+    // 索引进度：事件只是一次「有进展」的提醒，最终数值仍以 index_status 为准（事件+拉取双保险）。
+    void subscribe(EVT.INDEX_PROGRESS, (payload) => {
+      const p = payload as { done?: number; total?: number; queued?: number } | null;
+      if (typeof p?.done === "number" && typeof p?.total === "number") {
+        setIndexing({ done: p.done, total: p.total });
+      }
+    }).then((fn) => disposers.push(fn));
+    return () => {
+      for (const dispose of disposers) dispose();
+    };
   }, [refresh]);
 
   // Ctrl+K 全局搜索
@@ -176,7 +184,14 @@ export function AppShell(): ReactElement {
           <button type="button" onClick={() => openRoute("library")} className={route === "library" ? "is-active" : ""}>文献库</button>
           <button type="button" onClick={() => openRoute("settings")} className={route === "settings" ? "is-active" : ""}>设置</button>
         </nav>
-        <span className="lg-status">{busy !== "" ? busy : status || (ready ? "就绪" : "连接中…")}</span>
+        {indexing !== null && indexing.total > 0 ? (
+          <span className="lg-progress" title="索引进度">
+            <span style={{ width: Math.round((indexing.done / Math.max(1, indexing.total)) * 100) + "%" }} />
+          </span>
+        ) : null}
+        <span className="lg-status">
+          {busy !== "" ? busy : indexing !== null && indexing.total > 0 ? "索引 " + indexing.done + "/" + indexing.total : status || (ready ? "就绪" : "连接中…")}
+        </span>
       </header>
 
       {addOpen ? (

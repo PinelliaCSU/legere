@@ -32,10 +32,11 @@ export interface RenderBudget {
 }
 
 /// 契约默认值（R3）：并发 2、缓存 256 MiB、预取 2。
+// 实测调整：并发 3 让首屏两页几乎同时到位；预存取 1，避免大文档一次抢占过多解析带宽。
 export const DEFAULT_BUDGET: RenderBudget = {
-  maxConcurrent: 2,
+  maxConcurrent: 3,
   cacheBytes: 268_435_456,
-  prefetchPages: 2,
+  prefetchPages: 1,
 };
 
 export interface RenderScheduler {
