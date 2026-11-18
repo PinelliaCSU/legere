@@ -46,3 +46,24 @@ fn seg_text_is_space_joined() {
     assert!(seg.contains(' '), "seg_text 应以空格分隔 token：{seg:?}");
     assert!(!seg.contains("，"), "标点应被过滤");
 }
+// 真实 PDF 冒烟（默认 ignore）：用于确认 lopdf 提取在真实文档上的表现。
+// 运行方式：
+//   $env:LEGERE_REAL_PDF="D:\\path\\to.pdf"; cargo test real_pdf_extraction -- --ignored --nocapture
+#[test]
+#[ignore]
+fn real_pdf_extraction_smoke() {
+    let Ok(path) = std::env::var("LEGERE_REAL_PDF") else {
+        panic!("需要设置 LEGERE_REAL_PDF 指向一个真实 PDF");
+    };
+    use super::extract::{looks_like_text, LopdfExtractor, TextExtractor};
+    let extractor = LopdfExtractor;
+    let (meta, pages) = extractor.extract(std::path::Path::new(&path)).expect("解析真实 PDF");
+    let with_text = pages.iter().filter(|p| looks_like_text(&p.text)).count();
+    let total_chars: usize = pages.iter().map(|p| p.text.chars().count()).sum();
+    println!("real pdf: pages={} with_text={} total_chars={} title={:?}", meta.page_count, with_text, total_chars, meta.title);
+    for page in pages.iter().take(3) {
+        let sample: String = page.text.chars().take(80).collect();
+        println!("  p{} chars={} sample={:?}", page.page_no, page.text.chars().count(), sample);
+    }
+    assert!(meta.page_count > 0, "页数应大于 0");
+}

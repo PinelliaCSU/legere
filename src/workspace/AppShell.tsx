@@ -36,6 +36,10 @@ export function AppShell(): ReactElement {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<{ documentId: number; title: string; hits: DocSearchHit[] }[]>([]);
   const [ready, setReady] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addPath, setAddPath] = useState("");
+  const [busy, setBusy] = useState("");
+
 
   const refresh = useCallback(async () => {
     try {
@@ -105,19 +109,47 @@ export function AppShell(): ReactElement {
 
   const books = useMemo(() => documents.map(toHomeBook), [documents]);
 
-  const onAddLibrary = useCallback(async () => {
-    const path = window.prompt("输入文献库文件夹的绝对路径");
-    if (path === null || path.trim().length === 0) return;
+  // 注意：WebView2 不支持 window.prompt，必须用应用内输入框（否则按钮点了没反应）。
+  const onAddLibrary = useCallback(async (rawPath: string) => {
+    const path = rawPath.trim();
+    if (path.length === 0) return;
     try {
-      const root = await call(CMD.LIBRARY_ROOT_ADD, { path: path.trim() });
+      setBusy("添加文献库…");
+      const root = await call(CMD.LIBRARY_ROOT_ADD, { path });
       setStatus("已添加文献库：" + root.displayName);
+      setBusy("扫描中…");
       await call(CMD.LIBRARY_SCAN_START, { rootId: root.id });
-      window.setTimeout(() => void refresh(), 1500);
+      // 扫描是后台任务：等一会儿再刷新，并把新文档送进索引队列（否则搜不到）。
+      await new Promise((r) => setTimeout(r, 2000));
+      const docs = await call(CMD.DOCUMENT_RECENT, { limit: 200 });
+      setBusy("建立索引…");
+      for (const doc of docs) {
+        await call(CMD.INDEX_ENQUEUE, { documentId: doc.id, priority: 0 }).catch(() => undefined);
+      }
+      setStatus("已加入 " + docs.length + " 本文献，正在后台索引（搜索需要索引完成）");
+      setAddOpen(false);
+      setAddPath("");
+      await refresh();
     } catch (err) {
-      const e = err as { code?: string; detail?: string };
-      setStatus("添加失败：" + (e.code ?? "E_INTERNAL") + (e.detail ? " — " + e.detail : ""));
+      const e = err as { code?: string; detail?: string; message?: string };
+      setStatus("添加失败：" + (e.code ?? "E_INTERNAL") + " — " + (e.detail ?? e.message ?? ""));
+    } finally {
+      setBusy("");
     }
   }, [refresh]);
+
+  const reindexAll = useCallback(async () => {
+    try {
+      setBusy("重建索引…");
+      const started = await call(CMD.INDEX_REBUILD_ALL, {});
+      setStatus("重建索引已启动：" + JSON.stringify(started));
+    } catch (err) {
+      const e = err as { code?: string; detail?: string };
+      setStatus("重建失败：" + (e.code ?? "E_INTERNAL") + " — " + (e.detail ?? ""));
+    } finally {
+      setBusy("");
+    }
+  }, []);
 
   const saveProgress = useCallback(
     (docId: number) => (p: { pageNo: number; scrollRatio: number; zoom: number; mode: "continuous" | "single" }) => {
@@ -144,18 +176,40 @@ export function AppShell(): ReactElement {
           <button type="button" onClick={() => openRoute("library")} className={route === "library" ? "is-active" : ""}>文献库</button>
           <button type="button" onClick={() => openRoute("settings")} className={route === "settings" ? "is-active" : ""}>设置</button>
         </nav>
-        <span className="lg-status">{status || (ready ? "就绪" : "连接中…")}</span>
+        <span className="lg-status">{busy !== "" ? busy : status || (ready ? "就绪" : "连接中…")}</span>
       </header>
+
+      {addOpen ? (
+        <div className="lg-addbar">
+          <input
+            autoFocus
+            placeholder="粘贴文献库文件夹的绝对路径，例如 D:\Papers"
+            value={addPath}
+            onChange={(e) => setAddPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void onAddLibrary(addPath);
+              if (e.key === "Escape") setAddOpen(false);
+            }}
+          />
+          <button type="button" className="lg-btn lg-btn-primary" onClick={() => void onAddLibrary(addPath)}>
+            添加并扫描
+          </button>
+          <button type="button" className="lg-btn" onClick={() => setAddOpen(false)}>
+            取消
+          </button>
+        </div>
+      ) : null}
 
       <main className="lg-main">
         {route === "home" ? (
-          <HomeSpace books={books} onOpenBook={(id) => openDocument(id)} onAddLibrary={() => void onAddLibrary()} />
+          <HomeSpace books={books} onOpenBook={(id) => openDocument(id)} onAddLibrary={() => setAddOpen(true)} />
         ) : null}
 
         {route === "library" ? (
           <section className="lg-library">
             <div className="lg-library-toolbar">
-              <button type="button" className="lg-btn" onClick={() => void onAddLibrary()}>添加文献库</button>
+              <button type="button" className="lg-btn" onClick={() => setAddOpen(true)}>添加文献库</button>
+              <button type="button" className="lg-btn" onClick={() => void reindexAll()} disabled={busy !== ""}>重建索引</button>
               <button type="button" className="lg-btn" onClick={() => void refresh()}>刷新</button>
               <span className="lg-muted">{documents.length} 本</span>
             </div>
