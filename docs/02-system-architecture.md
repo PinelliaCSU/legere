@@ -25,6 +25,14 @@
 
 未经验证的事实**不得**在代码或文档中当作已确认结论使用。每项都必须由一个可执行的探针关闭，并在交付报告中记录结论。
 
+> **V-06 取证记录（2026-11-18，第一轮 Rust 环境就绪后）**
+>
+> - 已在 M01 中实现取证点：协议 handler 以 `INFO` 记录 `uri` / `range` / `method` / 响应 `status` / `content_range` / `body_len`，**任何真实客户端请求都会被记录下来**。
+> - 本机运行结果：`WebviewWindowBuilder::build()` 返回 `Io(Os { code: 5, kind: PermissionDenied })`，窗口在 Tauri 内部 setup 阶段（`app.rs` 先建窗、后跑用户 setup）即失败，**用户 setup 与协议 handler 均未被调用**，因此拿不到真实 `req.uri()`。
+> - 排除项：WebView2 运行时已安装（157.0.4341.46）；PowerShell 可写 `%LOCALAPPDATA%`；WinForms 窗口可正常创建；`WEBVIEW2_USER_DATA_FOLDER` 指向工作区也无效。⇒ 判定为**宿主环境对 WebView2 的限制**，非本项目代码缺陷。
+> - 已由单测覆盖的部分：Range 判定 8 条 + URI 双形态解析（`pdf://doc/17` 与 `http://pdf.localhost/doc/17`）+ 响应构造，共 13 条测试全绿。**这些都是逻辑层结论，不能替代端到端 206 取证。**
+> - 关闭条件：在具备桌面 WebView2 权限的机器上运行一次应用，读取日志中的 `pdf:// 请求进入` 与 `pdf:// 响应` 两行，把真实 URI 与状态码回填本表后勾掉。
+
 | ID | 待验证内容 | 探针（可执行、可判定） | 责任模块 |
 |---|---|---|---|
 | V-01 | pdfjs-dist 目标版本的 TextLayer API 形态（`renderTextLayer` 是否已移除、`TextLayer` 类的构造签名、`canvasContext` 参数） | `npm view pdfjs-dist version` + 读该版本 `types/src/display/api.d.ts` 与 `text_layer.d.ts`，抄录签名 | M05 |
@@ -32,7 +40,7 @@
 | V-03 | 本次捆绑的 SQLite 是否启用 FTS5，以及是否支持 `contentless_delete` | 启动时执行探针 SQL：`CREATE VIRTUAL TABLE t USING fts5(a, content='', contentless_delete=1)`，捕获结果并写日志 | M03 |
 | V-04 | jieba-rs 精确模式在「中英混排 + 标点」上的切分结果是否符合索引/查询对称要求 | 单元测试：同一文本切分两次结果一致；查询串切分与文档串切分使用同一词典配置 | M09 |
 | V-05 | notify 在 Windows 上的重命名/移动事件语义（是否成对给出 Remove+Create） | 手工探针程序记录事件序列 | M04 |
-| V-06 | Tauri 2 自定义协议在 Windows 上的实际 URL 形态与 Range 请求可支持性 | 最小壳工程：注册 `pdf` scheme，用 `fetch` 发 `Range: bytes=0-` 并打印状态码 | M01 |
+| V-06 | Tauri 2 自定义协议在 Windows 上的实际 URL 形态与 Range 请求可支持性 | 最小壳工程：注册 `pdf` scheme，用 `fetch` 发 `Range: bytes=0-` 并打印状态码 | M01 · **未关闭（环境阻塞，见下表注）** |
 | V-07 | 大 PDF（>300MB）经自定义协议 + Range 时 PDF.js 的分段加载行为 | 用真实样本测量首屏时间与内存 | M05/M06 |
 | V-08 | `page.cleanup()` 之后重新 render 的重解析耗时与内存回落 | 单测 render→cleanup→render + 打点；判据 重解析 ≤ 80ms、堆回落 ≥ 单页位图量 | M05 |
 | V-09 | pdfjs worker 是否随打开次数增长（共享 vs 一文档一个） | 打开/关闭循环 20 次，观察线程数与堆；判据 线程数恒定、堆增长 < 20MB | M05 |

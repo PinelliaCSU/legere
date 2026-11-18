@@ -80,3 +80,53 @@ Command: TS 28 / Rust 28
 - `invoke_handler` 目前只注册 `ping`/`app_info` 两条；M02 的「注册集合 == `CMD` 集合」验收要等全部模块落地，属**计划内阶段缺口**，不得当作已通过。
 - `lib.rs` 的 `pdf://` handler 现返回内置样本；M04 提供 `DocumentPathResolver` 后替换为真实文件读取。
 - 冒烟壳 `src/App.tsx` 在 M14 接入 `AppShell` 时删除。
+
+---
+
+## 8. 第二轮执行记录（Rust 环境就绪后，2026-11-18）
+
+**status: 部分通过**（编译/单测/类型检查通过；端到端 `pdf://` 取证被宿主环境阻塞）
+
+### 8.1 环境实况（实测）
+
+| 项 | 结果 |
+|---|---|
+| `cargo` | 1.100.0（不在本进程 PATH，实际路径 `C:\Users\Lenovo\.cargo\bin\cargo.exe`） |
+| `rustc` | 1.100.0 |
+| `pnpm` | 10.26.1；registry 已指向 `https://registry.npmmirror.com` |
+| `git` | 2.47.0.windows.2（配 `http.proxy=127.0.0.1:7890`） |
+| crates.io 直连 | **失败**：`[35] schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`。curl 同样失败，git（OpenSSL）与 node fetch 正常 ⇒ 本机进程不可用 Windows Schannel |
+| npm registry 直连 | HTTPS 同样受 schannel 限制；pnpm 走镜像正常 |
+
+构建期绕过（不改产品代码）：`scripts/cargo-http-mirror.mjs` 起本地 HTTP 镜像（Node TLS 转发 crates.io），配合 `.cargo/config.toml`（已 gitignore）与工作区内 `CARGO_HOME`（沙箱禁止写工作区外路径）。
+
+### 8.2 命令与结果
+
+```text
+$ pnpm install                       -> exit 0（132 包，10.6s）
+$ pnpm typecheck (tsc --noEmit)      -> exit 0（无输出）
+$ cargo build                        -> Finished dev profile in 33.99s
+$ cargo test                         -> 13 passed; 0 failed（exit 0）
+$ node scripts/check-contracts.mjs   -> exit 0（18 DTO / 28 Command / 12 错误码一致）
+```
+
+**过程中修掉的真实缺陷（1 个）**：`pdf://doc/17` 中 `doc` 是 **authority** 而非路径段，原实现把它当路径 → 返回 `400`。
+修正后同时支持 `pdf://doc/17` 与 `http://pdf.localhost/doc/17`，并补 9 条 URI 回归断言（总测试 13 条）。
+
+**其他构建阻塞（已解决）**：`tauri-build` 要求 `icons/icon.ico`；PNG-in-ICO 会被判 `muda::icon::BadIcon`，改为经典 BMP(DIB) 32bpp 多尺寸 ICO（16/32/48/64/128/256）后通过。图标为**中性灰占位**，正式图标待用户提供。
+
+### 8.3 验证目标 ①（`pdf://` 的 206 + Range）——**未取得**
+
+- 现象：`WebviewWindowBuilder::build()` → `Io(Os { code: 5, kind: PermissionDenied })`；失败发生在 Tauri 内部 setup（先建窗、后跑用户 setup），面包屑证明用户 setup 从未进入。
+- 排除：WebView2 运行时已装（157.0.4341.46）；`%LOCALAPPDATA%` 可写；WinForms 窗口可创建；`WEBVIEW2_USER_DATA_FOLDER` 指向工作区亦无效。
+- 结论：宿主环境限制，非代码缺陷。取证点已就位（handler 以 INFO 记录 uri/range/status/content-range），换到有桌面 WebView2 权限的机器即可一次关闭 V-06。
+- **不得**把「13 条单测通过」表述为「206 取证通过」。
+
+### 8.4 验证目标 ②（45 个色值观感）
+
+按 V1 裁决 (a) 推迟到 M13/M14；本轮未做，也不属 M01/M02 验收范围。
+
+### 8.5 仍未验证
+
+- `pnpm build` / `vite build`：esbuild 的 postinstall 与服务需要 piped stdio 子进程，本会话禁止（`spawn EPERM`）；`node_modules` 中 `picomatch` 亦未落盘。**前端打包链路未验证**（`tsc --noEmit` 已覆盖类型正确性）。
+- 端到端 GUI：同上（WebView2 被拒）。
