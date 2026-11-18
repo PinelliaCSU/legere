@@ -11,9 +11,42 @@ type Status =
   | { kind: "ok"; ping: PingDto; info: AppInfoDto }
   | { kind: "error"; code: string; message: string; detail: string };
 
+interface ProbeResult {
+  label: string;
+  request: string;
+  outcome: string;
+}
+
+// V-06 探针：确认 Windows 上 pdf:// 的真实 URL 形态与 Range 响应状态。
+// 两种形态都试，因为 Windows/Android 上自定义 scheme 会被映射到 http://<scheme>.localhost。
+const PROBE_TARGETS: { label: string; url: string; range?: string }[] = [
+  { label: "pdf:// 无 Range", url: "pdf://doc/1" },
+  { label: "pdf:// Range 0-9", url: "pdf://doc/1", range: "bytes=0-9" },
+  { label: "localhost 形态 无 Range", url: "http://pdf.localhost/doc/1" },
+  { label: "localhost 形态 Range 0-9", url: "http://pdf.localhost/doc/1", range: "bytes=0-9" },
+];
+
+async function runProbe(target: (typeof PROBE_TARGETS)[number]): Promise<ProbeResult> {
+  const headers: Record<string, string> = target.range ? { Range: target.range } : {};
+  try {
+    const res = await fetch(target.url, { headers });
+    const body = new Uint8Array(await res.arrayBuffer());
+    const parts = [
+      `status=${res.status}`,
+      `content-range=${res.headers.get("content-range") ?? "(none)"}`,
+      `accept-ranges=${res.headers.get("accept-ranges") ?? "(none)"}`,
+      `bytes=${body.length}`,
+    ];
+    return { label: target.label, request: `${target.url}${target.range ? ` @ ${target.range}` : ""}`, outcome: parts.join(" ") };
+  } catch (err) {
+    return { label: target.label, request: target.url, outcome: `fetch 失败: ${String(err)}` };
+  }
+}
+
 export default function App(): ReactElement {
   const [status, setStatus] = useState<Status>({ kind: "probing" });
   const [readyEvent, setReadyEvent] = useState<string | null>(null);
+  const [probes, setProbes] = useState<ProbeResult[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -33,6 +66,20 @@ export default function App(): ReactElement {
           });
         }
       }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const results: ProbeResult[] = [];
+      for (const target of PROBE_TARGETS) {
+        results.push(await runProbe(target));
+      }
+      if (alive) setProbes(results);
     })();
     return () => {
       alive = false;
@@ -78,6 +125,14 @@ export default function App(): ReactElement {
           </dl>
           <p>ping.ok = {String(status.ping.ok)}</p>
           <p>app://ready = {readyEvent ?? "(未收到)"}</p>
+          <h2>pdf:// 探针（V-06）</h2>
+          <ul>
+            {probes.map((p) => (
+              <li key={p.label}>
+                <strong>{p.label}</strong>：{p.outcome}
+              </li>
+            ))}
+          </ul>
         </>
       )}
     </main>
