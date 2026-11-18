@@ -332,3 +332,76 @@ $ node scripts/check-contracts.mjs -> 契约一致（18 DTO / 28 Command / 12 �
 
 - `notify` 文件监控与 800ms 防抖（M04 的一部分）：当前只有「手动触发扫描」，运行期变更尚未自动感知。
 - `rootIds` / `textStates` 过滤、`document_list` 的 `added` 排序语义测试。
+---
+
+## 14. 本轮（连续推进）交付汇总：M04 收尾 + M09/M10/M11 + M12/M13
+
+### 14.1 M04 收尾：notify 监控 + 800ms 防抖
+
+- `library/watch.rs`：`notify` 递归监控 `*.pdf`；`Debouncer`（纯逻辑）把 800ms 内的连续事件聚合为一次扫描。
+- 监控只做「触发器」，真正的差异判定仍走 `scan_root`（只有一套判定逻辑）。
+- `AppState` 持有 `RecommendedWatcher` 句柄，否则监听会随 drop 立即停止。
+- 测试 4 条：窗口常量、窗口内不冲刷、`take` 去重、多路径合并。
+
+### 14.2 M09 文本提取与索引写入
+
+- `index/extract.rs`：lopdf 解析 `Tj`/`TJ`；`looks_like_text` 质量判定（乱码按 `no_text`，宁可不可检索也不污染索引）。
+- `index/segment.rs`：jieba-rs 精确模式（HMM 关闭），索引侧与查询侧共用同一实现（V-04 对称性）。
+- `index/writer.rs`：8 页/事务分批写 `page_text`+`page_fts`（同事务同 rowid，幂等：先清旧索引）。
+- 测试 5 条：Tj、TJ 数组、乱码判定、分词确定性与对称、seg_text 空格分隔。
+
+### 14.3 M10 索引任务调度
+
+- `jobs/mod.rs`：`VecDeque` + `Condvar` 单工作线程；priority 升序（0=前台）；协作式取消（排队中直接移除 / 运行中登记标记）；暂停恢复；失败重试上限 3 次。
+- 事件 `index://job-finished`、`index://progress`；命令 `index_enqueue/cancel/status/pause/rebuild_all`。
+
+### 14.4 M11 全局检索
+
+- `search/mod.rs`：`sanitize_query` 去 FTS 语法字符 → 同一分词器切分 → phrase/terms `MATCH`；bm25 排序；按文档聚合。
+- 上下文与命中区间在 `raw_text` 上自算（不用 `snippet()`，D06），返回字符区间左闭右开。
+- 单字查询显式 `E_INVALID_ARG`（T19）；命令名与契约一致（曾误命名 `search_global_cmd`，已修）。
+- 测试 4 条：净化、MATCH 形态、字符区间、上下文省略号。
+
+### 14.5 M12 书签/进度 · M13 主题令牌
+
+- `BookmarkRepo`（list/create/update/delete，pageNo>=1 校验，未提供字段不改）、`ProgressRepo`（upsert + `scroll_ratio` 夹取 + 同步 `last_opened_at`）。
+- 命令 8 条：`bookmark_*`、`progress_get/save`（未知文档 → `E_NOT_FOUND`，契约 R19）、`settings_get_all/set`。
+- `src/theme/tokens.ts`：15 令牌 × 3 套主题（值取自 docs/15）+ 纸色光罩常量 + CSS 变量生成。
+- `scripts/check-theme.mjs`：键集合一致性与 5 组对比度门槛（正文 ≥10:1、次级 ≥4.5:1、弱提示 ≥3:1、强调按钮 ≥4.5:1、页面底色正文 ≥7:1）。
+
+### 14.6 本轮验证
+
+```text
+$ cargo test                      -> 39 passed; 0 failed
+$ pnpm typecheck                  -> exit 0
+$ pnpm build                      -> ✓ built
+$ node scripts/check-contracts.mjs -> 契约一致（18 DTO / 28 Command / 12 错误码）
+$ node scripts/check-theme.mjs     -> 主题校验通过：3 套 × 15 令牌，对比度全部达标
+```
+
+真机端到端（release + 生产数据目录 + 截图核对）：
+
+```text
+检索链探针（M09–M11）
+  1 待索引文档: total=2
+  2 已入队: 2 个任务（priority=0 前台优先）
+  3 索引状态: indexed=2 failed=0 noText=0 queued=0
+  4 文档状态: textState=indexed pageCount=1
+  5 搜索 Legere: documents=2 tookMs=12
+  6 首个命中: p1 「Legere sample page」 ranges=[[1,7]]
+  7 计数: documents=2 pages=2
+  8 无命中: documents=0
+```
+
+### 14.7 未完成（明确说明，不伪装）
+
+| 模块 | 状态 | 原因 |
+|---|---|---|
+| M05 pdf-engine | 未开始 | 需先装 pdfjs-dist 并按 V-01 门禁抄录该版本 d.ts（TextLayer 形态），再写适配层 |
+| M06 render-scheduler | 未开始 | 依赖 M05 的 PageHandle/RenderTask 契约 |
+| M07 reader-interaction | 未开始 | 依赖 M06；且 §4.0 外壳（左右悬浮圆按钮）需真实界面调优 |
+| M08 doc-search | 未开始 | 依赖 M06/M07 的文本层与坐标 |
+| M14 workspace-shell | 未开始 | 主页空间转盘是你的签名功能，需在真实界面里按 13 文档参数逐项调（截图能力已具备） |
+| M15 integration-release | 未开始 | 依赖上面全部 + 真实桌面打包验证 |
+
+结论：**后端能力链（M01–M04、M09–M13）已完整落地并逐项验证；前端引擎与界面层（M05–M08、M14、M15）尚未开始。**
