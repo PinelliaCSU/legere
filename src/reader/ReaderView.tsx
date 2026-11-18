@@ -28,6 +28,8 @@ import {
   parseDefaultMode,
   parseDefaultScale,
 } from "../settings/reader-prefs";
+import { useTheme } from "../theme/ThemeProvider";
+import { readerToneClass } from "../theme/theme-prefs";
 import { BookmarkDrawer } from "./BookmarkDrawer";
 import { mountHighlights } from "./highlight";
 import { searchPages, type DocSearchHit } from "./search/doc-search";
@@ -95,6 +97,8 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   const [outlineOpen, setOutlineOpen] = useState(false);
   /// 阅读选项面板（本轮需求 1）：默认收起，不占版面。
   const [menuOpen, setMenuOpen] = useState(false);
+  const { theme, pageTone } = useTheme();
+
   /// 阅读区内的临时提示（缩放的百分比 / 已复制 / 已回到第 N 页）。
   const [notice, setNotice] = useState<string | null>(null);
   /// 右键呼出功能面板时的落点（null = 用默认的右下角锚点）。
@@ -638,7 +642,15 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   const activeRanges = hits[activeHit]?.ranges ?? [];
 
   return (
-    <div className="lg-reader" ref={scrollRef} tabIndex={0}>
+    <div
+      className={
+        "lg-reader" +
+        // 深色主题下的页面色调（不处理 / 调暗 / 反色）：只改 canvas 的呈现，不动像素数据。
+        (readerToneClass(theme, pageTone) === "" ? "" : " " + readerToneClass(theme, pageTone))
+      }
+      ref={scrollRef}
+      tabIndex={0}
+    >
       {loading ? <p className="lg-reader-status">正在打开…</p> : null}
       {error !== null ? (
         <div className="lg-reader-status lg-reader-failed">

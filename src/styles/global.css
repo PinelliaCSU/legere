@@ -176,6 +176,25 @@ body {
 /* ── 阅读器（D15/D16：无工具栏 + 底部胶囊） ── */
 .lg-reader { position: absolute; inset: 0; overflow: auto; background: var(--lg-page-bg); padding: 32px 0; }
 /* 中键拖动平移时的抓手光标。 */
+/* 深色主题下的页面色调：只影响画布的呈现，不改像素。
+   dim = 整体压暗（图片颜色基本不变）；invert = 反色 + 色相回旋（浅底变深底，图片也会被反色）。 */
+/* 书签行：默认是「跳转 + 编辑 + 删除」一行；编辑态换成两个输入框与保存/取消。 */
+.lg-bookmark { display: flex; align-items: center; gap: 6px; }
+.lg-bookmark.is-editing { flex-wrap: wrap; }
+.lg-bookmark-go {
+  flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  background: none; border: 0; padding: 4px 0; cursor: pointer; text-align: left;
+  color: var(--lg-fg-primary); font-size: 13px;
+}
+.lg-bookmark-title { font-variant-numeric: tabular-nums; }
+.lg-bookmark-note { font-size: 11px; color: var(--lg-fg-muted); }
+.lg-bookmark-input {
+  flex: 1; min-width: 90px; padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--lg-border-strong); border-radius: 6px;
+  background: var(--lg-bg-surface); color: var(--lg-fg-primary);
+}
+.lg-reader.tone-dim .lg-page-canvas canvas { filter: brightness(0.78); }
+.lg-reader.tone-invert .lg-page-canvas canvas { filter: invert(1) hue-rotate(180deg); }
 .lg-reader.is-panning { cursor: grabbing; }
 .lg-reader.is-panning * { cursor: grabbing; }
 .lg-reader-status { text-align: center; color: var(--lg-fg-muted); }

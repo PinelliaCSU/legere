@@ -6,12 +6,27 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { call } from "../core/ipc";
 import { CMD } from "../contracts/cmd";
 import { PAPER_VEIL, themes, toCssVariables, type ThemeName } from "./tokens";
+import {
+  PAGE_TONE_KEY,
+  THEME_SOURCE_KEY,
+  parsePageTone,
+  parseThemeSource,
+  themeForSystem,
+  type PageTone,
+  type ThemeSource,
+} from "./theme-prefs";
 
 interface ThemeContextValue {
   theme: ThemeName;
   paperVeil: boolean;
+  /// 主题来源：手动选，还是跟随系统的深/浅色。
+  themeSource: ThemeSource;
+  /// 深色主题下的页面色调（PDF 页面本身是白的）。
+  pageTone: PageTone;
   setTheme: (theme: ThemeName) => void;
   setPaperVeil: (on: boolean) => void;
+  setThemeSource: (source: ThemeSource) => void;
+  setPageTone: (tone: PageTone) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -20,6 +35,8 @@ export function ThemeProvider({ children }: { children: ReactNode }): ReactEleme
   // 默认 light（M13 §7.2 第 3 条占位值；跟随系统由 D13/T13 决定但首版先按已存取值为准）。
   const [theme, setThemeState] = useState<ThemeName>("light");
   const [paperVeil, setPaperVeilState] = useState(true);
+  const [themeSource, setThemeSourceState] = useState<ThemeSource>("manual");
+  const [pageTone, setPageToneState] = useState<PageTone>("off");
 
   // 读取已存设置（失败不影响界面，用默认值）。
   useEffect(() => {
@@ -32,6 +49,10 @@ export function ThemeProvider({ children }: { children: ReactNode }): ReactEleme
         }
         const veil = all["ui.paperVeil"];
         if (veil === "true" || veil === "false") setPaperVeilState(veil === "true");
+        const source = parseThemeSource(all[THEME_SOURCE_KEY]);
+        if (source !== null) setThemeSourceState(source);
+        const tone = parsePageTone(all[PAGE_TONE_KEY]);
+        if (tone !== null) setPageToneState(tone);
       } catch {
         // 数据库不可用时保持默认主题，不阻塞渲染。
       }
@@ -70,9 +91,36 @@ export function ThemeProvider({ children }: { children: ReactNode }): ReactEleme
     [persist],
   );
 
+  const setThemeSource = useCallback(
+    (source: ThemeSource) => {
+      setThemeSourceState(source);
+      persist(THEME_SOURCE_KEY, source);
+    },
+    [persist],
+  );
+
+  const setPageTone = useCallback(
+    (tone: PageTone) => {
+      setPageToneState(tone);
+      persist(PAGE_TONE_KEY, tone);
+    },
+    [persist],
+  );
+
+  // 跟随系统：订阅 prefers-color-scheme，系统深色切换时主题立刻跟上。
+  // paper 不会被"跟随系统"选中（它是手动主题），只在系统深/浅两者间切换。
+  useEffect(() => {
+    if (themeSource !== "system") return;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = (): void => setThemeState(themeForSystem(query.matches));
+    apply();
+    query.addEventListener("change", apply);
+    return () => query.removeEventListener("change", apply);
+  }, [themeSource]);
+
   const value = useMemo(
-    () => ({ theme, paperVeil, setTheme, setPaperVeil }),
-    [theme, paperVeil, setTheme, setPaperVeil],
+    () => ({ theme, paperVeil, themeSource, pageTone, setTheme, setPaperVeil, setThemeSource, setPageTone }),
+    [theme, paperVeil, themeSource, pageTone, setTheme, setPaperVeil, setThemeSource, setPageTone],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;

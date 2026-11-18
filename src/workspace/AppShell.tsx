@@ -15,6 +15,7 @@ import { useTheme } from "../theme/ThemeProvider";
 import type { ThemeName } from "../theme/tokens";
 import { HomeSpace, spineColorFor, type HomeBook } from "./HomeSpace";
 import { rootLabel } from "./library-roots";
+import { PAGE_TONE_OPTIONS, THEME_SOURCE_OPTIONS } from "../theme/theme-prefs";
 import { KEYMAP, keymapEntryCount } from "../settings/keymap";
 import {
   DEFAULT_MODE_OPTIONS,
@@ -52,7 +53,16 @@ function toHomeBook(doc: DocumentDto): HomeBook {
 
 export function AppShell(): ReactElement {
   const { route, activeDocumentId, globalSearchOpen, openRoute, openDocument, closeDocument } = useAppStore();
-  const { theme, setTheme, paperVeil, setPaperVeil } = useTheme();
+  const {
+    theme,
+    setTheme,
+    paperVeil,
+    setPaperVeil,
+    themeSource,
+    setThemeSource,
+    pageTone,
+    setPageTone,
+  } = useTheme();
   const [documents, setDocuments] = useState<DocumentDto[]>([]);
   /// 库根列表：文献库的「更改 / 替换 / 移除」都作用在这一层（R22 / R23）。
   const [roots, setRoots] = useState<LibraryRootDto[]>([]);
@@ -397,6 +407,22 @@ export function AppShell(): ReactElement {
             <section className="lg-settings-section">
               <h2>外观</h2>
               <div className="lg-row">
+                <span className="lg-row-label">主题来源</span>
+                <div className="lg-theme-choices">
+                  {THEME_SOURCE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={themeSource === option.value ? "is-active" : ""}
+                      onClick={() => setThemeSource(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="lg-muted">跟随系统时只在 light / dark 之间切换</span>
+              </div>
+              <div className="lg-row">
                 <span className="lg-row-label">主题</span>
                 <div className="lg-theme-choices">
                   {(["light", "dark", "paper"] as ThemeName[]).map((name) => (
@@ -404,6 +430,7 @@ export function AppShell(): ReactElement {
                       key={name}
                       type="button"
                       className={theme === name ? "is-active" : ""}
+                      disabled={themeSource === "system"}
                       onClick={() => setTheme(name)}
                     >
                       {name}
@@ -420,6 +447,27 @@ export function AppShell(): ReactElement {
                   onChange={(e) => setPaperVeil(e.target.checked)}
                 />
                 <span className="lg-muted">仅在 paper 主题生效</span>
+              </div>
+              <div className="lg-row">
+                <span className="lg-row-label">页面色调</span>
+                <div className="lg-theme-choices">
+                  {PAGE_TONE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={pageTone === option.value ? "is-active" : ""}
+                      disabled={theme !== "dark"}
+                      onClick={() => setPageTone(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="lg-muted">
+                  {theme === "dark"
+                    ? (PAGE_TONE_OPTIONS.find((o) => o.value === pageTone)?.hint ?? "")
+                    : "仅深色主题生效：PDF 页面本身是纸白的，夜里刺眼"}
+                </span>
               </div>
             </section>
             <section className="lg-settings-section">
