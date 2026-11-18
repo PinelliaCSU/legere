@@ -1,7 +1,7 @@
-// 应用装配：日志 -> 数据库 -> 协议壳 -> Command 注册 -> 事件。
-//
-// 注意：本机环境 WebView2 窗口创建被拒绝（PermissionDenied），因此运行时探针 V-06
-// 只能在具备桌面 WebView2 权限的机器上关闭；逻辑侧的 Range/URI 判定已有单测覆盖。
+// 应用装配顺序（有意为之）：
+//   1. 解析数据目录（多级回退）  2. 初始化日志（多级回退 + panic 落盘）
+//   3. 建窗口  4. 打开数据库（失败只降级）  5. 广播 ready
+// 先建窗口再开库：任何后端初始化失败都不能让用户看到「双击后什么都没有」。
 
 pub mod commands;
 pub mod contracts;
@@ -9,8 +9,13 @@ pub mod db;
 pub mod error;
 pub mod logging;
 pub mod protocol;
+pub mod state;
+
+use std::path::PathBuf;
 
 use tauri::{Emitter, Manager};
+
+use state::AppState;
 
 const PDF_SCHEME: &str = "pdf";
 
@@ -23,53 +28,58 @@ const WINDOW_HEIGHT: f64 = 860.0;
 const WINDOW_MIN_WIDTH: f64 = 960.0;
 const WINDOW_MIN_HEIGHT: f64 = 640.0;
 
+/// 数据目录候选：显式覆盖 -> appDataDir -> LOCALAPPDATA\Legere -> 临时目录。
+fn data_dir_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("LEGERE_DATA_DIR") {
+        out.push(PathBuf::from(dir));
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        out.push(dir);
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        out.push(PathBuf::from(local).join("Legere"));
+    }
+    out.push(std::env::temp_dir().join("legere"));
+    out
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // 数据目录：默认 appDataDir；LEGERE_DATA_DIR 可覆盖（便携模式 / 受限环境调试）。
-            let data_dir = std::env::var_os("LEGERE_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    app.path()
-                        .app_data_dir()
-                        .unwrap_or_else(|_| std::env::temp_dir().join("legere"))
-                });
+            let candidates = data_dir_candidates(app.handle());
 
-            // 日志句柄必须活到进程结束；用 manage 持有。
-            match logging::init(&data_dir.join("logs")) {
+            // 日志目录：候选目录下的 logs/，依次尝试；全部失败也不 panic（只是没有文件日志）。
+            let log_candidates: Vec<PathBuf> = candidates.iter().map(|d| d.join("logs")).collect();
+            match logging::init(&log_candidates) {
                 Ok(guard) => {
                     tracing::info!(
                         log_dir = ?guard.log_dir,
                         version = commands::VERSION,
+                        candidates = ?candidates,
                         "Legere 启动"
                     );
                     app.manage(guard);
                 }
                 Err(err) => {
-                    // 日志目录不可写不应阻塞启动，但要留下痕迹。
-                    eprintln!("日志初始化失败: {err}");
+                    eprintln!("日志初始化失败（继续运行）: {err}");
                 }
             }
 
-            // 数据库：打开/迁移失败属于致命问题，必须显式报错而不是静默降级。
-            let db_path = data_dir.join("legere.db");
-            match db::Db::open(&db_path) {
-                Ok(handle) => {
-                    tracing::info!(
-                        db = ?handle.path(),
-                        fts5 = handle.capabilities().fts5,
-                        contentless_delete = handle.capabilities().contentless_delete,
-                        "数据库就绪"
-                    );
-                    app.manage(handle);
-                }
-                Err(err) => {
-                    eprintln!("数据库初始化失败: {err:?}");
-                    return Err(Box::new(std::io::Error::other(format!("db init failed: {err:?}"))) as Box<dyn std::error::Error>);
-                }
-            }
+            // 数据目录：取第一个可写候选。
+            let data_dir = candidates
+                .iter()
+                .find(|dir| {
+                    std::fs::create_dir_all(dir).is_ok()
+                        && std::fs::write(dir.join(".write-probe"), b"ok").is_ok()
+                })
+                .cloned()
+                .unwrap_or_else(|| std::env::temp_dir().join("legere"));
+            tracing::info!(?data_dir, "数据目录已选定");
 
-            // 建窗：数据目录可由 LEGERE_WEBVIEW_DATA_DIR 覆盖（默认交给 wry）。
+            app.manage(AppState::new(data_dir.clone()));
+
+            // 先建窗口：即使后端全挂，用户也要看到界面与原因。
             let mut builder = tauri::WebviewWindowBuilder::new(
                 app,
                 WINDOW_LABEL,
@@ -81,15 +91,44 @@ pub fn run() {
 
             if let Some(dir) = std::env::var_os("LEGERE_WEBVIEW_DATA_DIR") {
                 std::fs::create_dir_all(&dir).ok();
-                builder = builder.data_directory(std::path::PathBuf::from(dir));
+                builder = builder.data_directory(PathBuf::from(dir));
             }
 
             match builder.build() {
                 Ok(_) => tracing::info!("窗口已创建"),
                 Err(err) => {
-                    // 建窗失败不 panic：让日志与命令仍可用，便于诊断环境问题。
                     tracing::error!(?err, "窗口创建失败");
                     eprintln!("window build failed: {err:?}");
+                    // release 没有控制台：把原因写到 exe 同级，避免「双击后什么都没有」。
+                    if let Ok(exe) = std::env::current_exe() {
+                        if let Some(dir) = exe.parent() {
+                            let msg = format!("窗口创建失败: {err:?}\n数据目录: {}\n", data_dir.display());
+                            let _ = std::fs::write(dir.join("startup-error.txt"), msg);
+                        }
+                    }
+                }
+            }
+
+            // 再开数据库：失败只登记错误，不阻断启动。
+            let db_path = data_dir.join("legere.db");
+            match db::Db::open(&db_path) {
+                Ok(handle) => {
+                    tracing::info!(
+                        db = ?handle.path(),
+                        fts5 = handle.capabilities().fts5,
+                        contentless_delete = handle.capabilities().contentless_delete,
+                        "数据库就绪"
+                    );
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.install_db(handle);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(?err, "数据库初始化失败（降级运行）");
+                    eprintln!("数据库初始化失败（降级运行）: {err:?}");
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.set_db_error(format!("{err:?}"));
+                    }
                 }
             }
 
@@ -102,29 +141,18 @@ pub fn run() {
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol(PDF_SCHEME, |_app, request, responder| {
-            // M01/M03 阶段：只解析路由与 Range，返回内置样本；真实取文件由 M04 的
-            // DocumentPathResolver 提供（docs/05 §12），届时替换此处实现。
             let uri = request.uri().to_string();
             let range_header = request.headers().get("range").and_then(|v| v.to_str().ok());
 
             // V-06 取证点：真实客户端请求时记录 URI 形态与 Range 头。
-            tracing::info!(
-                %uri,
-                range = ?range_header,
-                method = %request.method(),
-                "pdf:// 请求进入"
-            );
+            tracing::info!(%uri, range = ?range_header, method = %request.method(), "pdf:// 请求进入");
 
             let response = match protocol::parse_document_id(&uri) {
                 Some(_doc_id) => {
                     let sample: &[u8] = include_bytes!("../assets/sample.pdf");
                     protocol::respond(sample, range_header)
                 }
-                None => protocol::ProtocolResponse {
-                    status: 400,
-                    content_range: None,
-                    body: Vec::new(),
-                },
+                None => protocol::ProtocolResponse { status: 400, content_range: None, body: Vec::new() },
             };
 
             tracing::info!(
@@ -144,10 +172,7 @@ pub fn run() {
             }
 
             let built = builder.body(response.body).unwrap_or_else(|_| {
-                tauri::http::Response::builder()
-                    .status(500)
-                    .body(Vec::new())
-                    .expect("构造 500 响应不应失败")
+                tauri::http::Response::builder().status(500).body(Vec::new()).expect("构造 500 响应不应失败")
             });
             responder.respond(built);
         })
