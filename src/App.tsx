@@ -45,10 +45,52 @@ async function runProbe(target: (typeof PROBE_TARGETS)[number]): Promise<ProbeRe
   }
 }
 
+
+interface LibProbe {
+  step: string;
+  detail: string;
+}
+
+// M04 探针：加库根 → 扫描 → 列表，验证扫描链路真的通了（M14 接入后随冒烟壳移除）。
+async function runLibraryProbe(): Promise<LibProbe[]> {
+  const out: LibProbe[] = [];
+  try {
+    const before = await call(CMD.LIBRARY_ROOT_LIST, {});
+    out.push({ step: "1 初始库根数", detail: String(before.length) });
+
+    const root = await call(CMD.LIBRARY_ROOT_ADD, { path: "C:\\Users\\Lenovo\\Desktop\\legere\\.probe-lib" });
+    out.push({ step: "2 加库根", detail: `id=${root.id} name=${root.displayName}` });
+
+    const started = await call(CMD.LIBRARY_SCAN_START, { rootId: root.id });
+    out.push({ step: "3 启动扫描", detail: `started=${started.started}` });
+
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const page = await call(CMD.DOCUMENT_LIST, {
+      query: { sort: "recent", order: "desc", offset: 0, limit: 50 },
+    });
+    out.push({ step: "4 扫描后文档数", detail: `total=${page.total}` });
+    out.push({ step: "5 前三个文件名", detail: page.items.slice(0, 3).map((d) => d.fileName).join(", ") || "(空)" });
+
+    const first = page.items[0];
+    if (first !== undefined) {
+      const src = await call(CMD.DOCUMENT_URL, { id: first.id });
+      out.push({ step: "6 document_url", detail: src.url });
+      const detail = await call(CMD.DOCUMENT_GET, { id: first.id });
+      out.push({ step: "7 详情", detail: `textState=${detail.textState} pageCount=${String(detail.pageCount)}` });
+    }
+  } catch (err) {
+    const msg = err instanceof IpcError ? `${err.code}: ${err.detail ?? err.message}` : String(err);
+    out.push({ step: "失败", detail: msg });
+  }
+  return out;
+}
+
 export default function App(): ReactElement {
   const [status, setStatus] = useState<Status>({ kind: "probing" });
   const [readyEvent, setReadyEvent] = useState<string | null>(null);
   const [probes, setProbes] = useState<ProbeResult[]>([]);
+  const [libProbes, setLibProbes] = useState<LibProbe[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -68,6 +110,17 @@ export default function App(): ReactElement {
           });
         }
       }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const lib = await runLibraryProbe();
+      if (alive) setLibProbes(lib);
     })();
     return () => {
       alive = false;
@@ -99,6 +152,15 @@ export default function App(): ReactElement {
   return (
     <main>
       <h1>Legere</h1>
+          <h2>文献库探针（M04）</h2>
+          <ul>
+            {libProbes.map((p) => (
+              <li key={p.step}>
+                <strong>{p.step}</strong>：{p.detail}
+              </li>
+            ))}
+          </ul>
+
       {status.kind === "probing" && <p>正在检测后端通道…</p>}
       {status.kind === "error" && (
         <>

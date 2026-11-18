@@ -287,3 +287,48 @@ $ cargo build --release                -> Finished release profile
 
 - `app://ready` 仍在 React 订阅前发出 → 冒烟壳显示「未收到」。可用性已由 `ping`/`app_info` 覆盖；M14 接入 `AppShell` 时统一改为「事件 + 拉取」双保险。
 - 截图能力已验证可用（`PrintWindow` + `PW_RENDERFULLCONTENT`），后续 UI 判定不再需要用户代劳。
+---
+
+## 13. M04 文献库扫描落地（2026-11-18）
+
+### 13.1 交付内容
+
+| 文件 | 作用 |
+|---|---|
+| `src-tauri/src/library/scan.rs` | 递归收集 `*.pdf`（跳过隐藏目录、2s 半写保护）、纯函数 `diff()`（新增/变更/复活/移除）、`scan_root` 事务落库 |
+| `src-tauri/src/library/mod.rs` | 模块导出与边界说明（只写文件事实，不解析 PDF） |
+| `src-tauri/src/commands/library.rs` | 9 条命令：`library_root_list/add/remove`、`library_scan_start`、`document_list/recent/get/url/touch_opened/record_delete` |
+| `src-tauri/src/db/repo.rs` | 新增 `facts_by_root`、`update_facts`（变更时清索引并回 `pending`）、`revive`、`touch_opened`、`get_detail`、`abs_path_of`、`delete_record`、`list_filtered`（文本+排序+分页） |
+| `src-tauri/src/library/tests.rs` | 6 条测试：diff 四分支 + 端到端（新增 2 → 变更 1 → 删除软删 1 → 复活 1）+ URL 形态 |
+
+### 13.2 关键决策落实
+
+- **R12（只清理不排任务）**：文件消失只做软删除，不产生任何索引任务。
+- **R16（purge 不删文件）**：`library_root_remove(purge=true)` 只做级联删除 + `VACUUM`。
+- **R17（路径 key）**：diff 与唯一性全部走 `rel_path_key`；大小写/分隔符差异不会造成假删除+假新增。
+- **R21（平台 URL）**：`document_url` 在 Windows 返回 `http://pdf.localhost/doc/{id}?v={mtime}`，并有单测锁死。
+- **不做假实现**：`document_list` 的 `rootIds`/`textStates` 过滤尚未实现时**显式返回 `E_UNSUPPORTED`**，不静默忽略。
+
+### 13.3 验证（真机，release + 生产数据目录）
+
+```text
+$ cargo test                     -> 26 passed; 0 failed
+$ pnpm typecheck                 -> exit 0
+$ pnpm build                     -> built in 896ms
+$ node scripts/check-contracts.mjs -> 契约一致（18 DTO / 28 Command / 12 错误码）
+
+后端日志：扫描完成 root_id=1 scanned=2 added=2 updated=0 revived=0 removed=0
+界面探针（截图核对）：
+  1 初始库根数: 1
+  2 加库根: id=1 name=.probe-lib
+  3 启动扫描: started=true
+  4 扫描后文档数: total=2
+  5 前三个文件名: beta.pdf, alpha.pdf
+  6 document_url: http://pdf.localhost/doc/2?v=1794976438081
+  7 详情: textState=pending pageCount=null   ← 符合预期：元数据由 M09 产出，此处不伪造
+```
+
+### 13.4 未完成（下一增量）
+
+- `notify` 文件监控与 800ms 防抖（M04 的一部分）：当前只有「手动触发扫描」，运行期变更尚未自动感知。
+- `rootIds` / `textStates` 过滤、`document_list` 的 `added` 排序语义测试。
