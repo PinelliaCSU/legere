@@ -19,12 +19,45 @@ pub trait LibraryRootRepo {
     fn remove(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
 }
 
+/// 扫描比对所需的最小事实集（不携带正文，避免大对象进出）。
+#[derive(Debug, Clone)]
+pub struct DocFact {
+    pub id: i64,
+    pub rel_path: String,
+    pub rel_path_key: String,
+    pub abs_path: String,
+    pub size_bytes: i64,
+    pub mtime_ms: i64,
+    pub deleted_at: Option<String>,
+}
+
 pub trait DocumentRepo {
     fn list_recent(&self, conn: &Connection, limit: i64) -> Result<Vec<DocumentDto>, ApiError>;
     fn list_page(&self, conn: &Connection, offset: i64, limit: i64) -> Result<PageDto<DocumentDto>, ApiError>;
     fn insert_found(&self, conn: &Connection, new: NewDocument<'_>) -> Result<i64, ApiError>;
     fn find_by_abs_path_key(&self, conn: &Connection, abs_path_key: &str) -> Result<Option<i64>, ApiError>;
     fn soft_delete(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
+
+    // —— M04 扫描所需 ——
+    /// 列表查询：支持文件名/标题模糊匹配与排序；不支持的过滤条件（rootIds/textStates）由命令层显式拒绝，
+    /// 不允许「收到但忽略」。
+    fn list_filtered(
+        &self,
+        conn: &Connection,
+        text: Option<&str>,
+        sort: &str,
+        order: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<PageDto<DocumentDto>, ApiError>;
+
+    fn facts_by_root(&self, conn: &Connection, root_id: i64) -> Result<Vec<DocFact>, ApiError>;
+    fn update_facts(&self, conn: &Connection, id: i64, size_bytes: i64, mtime_ms: i64) -> Result<(), ApiError>;
+    fn revive(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
+    fn touch_opened(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
+    fn get_detail(&self, conn: &Connection, id: i64) -> Result<crate::contracts::dto::DocumentDetailDto, ApiError>;
+    fn abs_path_of(&self, conn: &Connection, id: i64) -> Result<(String, Option<i64>, String, i64), ApiError>;
+    fn delete_record(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
 }
 
 pub trait SettingsRepo {
@@ -194,6 +227,244 @@ impl DocumentRepo for SqlRepos {
                 params![now, id],
             )
             .map_err(|e| db_err("软删除 document 失败", e))?;
+        if affected == 0 {
+            return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该文献", false));
+        }
+        Ok(())
+    }
+    fn list_filtered(
+        &self,
+        conn: &Connection,
+        text: Option<&str>,
+        sort: &str,
+        order: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<PageDto<DocumentDto>, ApiError> {
+        let order_sql = match sort {
+            "name" => "d.file_name COLLATE NOCASE",
+            "size" => "d.size_bytes",
+            "added" => "d.created_at",
+            _ => "COALESCE(d.last_opened_at, d.created_at)",
+        };
+        let dir = if order.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" };
+        let pattern = text.map(|t| format!("%{}%", t.replace('%', "").replace('_', "")));
+
+        let count_sql = "SELECT COUNT(*) FROM documents d WHERE d.deleted_at IS NULL \
+                         AND (?1 IS NULL OR d.file_name LIKE ?1 OR COALESCE(d.pdf_title,'') LIKE ?1)";
+        let total: i64 = conn
+            .query_row(count_sql, params![pattern], |row| row.get(0))
+            .map_err(|e| db_err("统计 documents 失败", e))?;
+
+        let sql = format!(
+            "SELECT d.id, d.library_root_id, d.file_name, d.rel_path, d.size_bytes, d.mtime_ms, \
+                    d.page_count, d.pdf_title, d.pdf_author, d.meta_state, d.text_state, \
+                    d.last_opened_at, (p.document_id IS NOT NULL), p.page_no \
+             FROM documents d LEFT JOIN reading_progress p ON p.document_id = d.id \
+             WHERE d.deleted_at IS NULL \
+               AND (?1 IS NULL OR d.file_name LIKE ?1 OR COALESCE(d.pdf_title,'') LIKE ?1) \
+             ORDER BY {order_sql} {dir}, d.id {dir} LIMIT ?2 OFFSET ?3"
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| db_err("准备列表查询失败", e))?;
+        let rows = stmt
+            .query_map(params![pattern, limit, offset], |row| {
+                Ok(DocumentDto {
+                    id: row.get(0)?,
+                    library_root_id: row.get(1)?,
+                    file_name: row.get(2)?,
+                    rel_path: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    mtime_ms: row.get(5)?,
+                    page_count: row.get(6)?,
+                    pdf_title: row.get(7)?,
+                    pdf_author: row.get(8)?,
+                    meta_state: parse_meta_state(row.get::<_, String>(9)?),
+                    text_state: parse_text_state(row.get::<_, String>(10)?),
+                    last_opened_at: row.get(11)?,
+                    has_progress: row.get::<_, i64>(12)? != 0,
+                    progress_page: row.get(13)?,
+                })
+            })
+            .map_err(|e| db_err("执行列表查询失败", e))?;
+        let items = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("读取列表失败", e))?;
+
+        Ok(PageDto { items, total, offset, limit })
+    }
+
+    fn facts_by_root(&self, conn: &Connection, root_id: i64) -> Result<Vec<DocFact>, ApiError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, rel_path, rel_path_key, abs_path, size_bytes, mtime_ms, deleted_at \
+                 FROM documents WHERE library_root_id = ?1",
+            )
+            .map_err(|e| db_err("准备 facts 查询失败", e))?;
+        let rows = stmt
+            .query_map(params![root_id], |row| {
+                Ok(DocFact {
+                    id: row.get(0)?,
+                    rel_path: row.get(1)?,
+                    rel_path_key: row.get(2)?,
+                    abs_path: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    mtime_ms: row.get(5)?,
+                    deleted_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| db_err("执行 facts 查询失败", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("读取 facts 失败", e))
+    }
+
+    fn update_facts(&self, conn: &Connection, id: i64, size_bytes: i64, mtime_ms: i64) -> Result<(), ApiError> {
+        // 文件内容变了：清掉旧索引并把状态打回 pending，交由 M10 重新入队。
+        conn.execute(
+            "UPDATE documents SET size_bytes = ?1, mtime_ms = ?2, text_state = 'pending', \
+                    meta_state = 'pending', index_error_code = NULL, index_error_msg = NULL, \
+                    updated_at = ?3 WHERE id = ?4",
+            params![size_bytes, mtime_ms, super::now_utc(), id],
+        )
+        .map_err(|e| db_err("更新文档事实失败", e))?;
+        delete_document_index(conn, id)?;
+        Ok(())
+    }
+
+    fn revive(&self, conn: &Connection, id: i64) -> Result<(), ApiError> {
+        conn.execute(
+            "UPDATE documents SET deleted_at = NULL, updated_at = ?1 WHERE id = ?2",
+            params![super::now_utc(), id],
+        )
+        .map_err(|e| db_err("复活文档失败", e))?;
+        Ok(())
+    }
+
+    fn touch_opened(&self, conn: &Connection, id: i64) -> Result<(), ApiError> {
+        let affected = conn
+            .execute(
+                "UPDATE documents SET last_opened_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                params![super::now_utc(), id],
+            )
+            .map_err(|e| db_err("更新最近打开时间失败", e))?;
+        if affected == 0 {
+            return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该文献", false));
+        }
+        Ok(())
+    }
+
+    fn get_detail(&self, conn: &Connection, id: i64) -> Result<crate::contracts::dto::DocumentDetailDto, ApiError> {
+        use crate::contracts::dto::{BookmarkDto, DocumentDetailDto, ProgressDto, ReadMode};
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.id, d.library_root_id, d.file_name, d.rel_path, d.size_bytes, d.mtime_ms, \
+                        d.page_count, d.pdf_title, d.pdf_author, d.meta_state, d.text_state, \
+                        d.last_opened_at, d.abs_path, d.pdf_subject, d.pdf_keywords, d.pdf_producer, \
+                        d.pdf_creator, d.pdf_creation_date, d.index_error_code, d.index_error_msg, \
+                        p.document_id, p.page_no, p.scroll_ratio, p.zoom, p.mode, p.updated_at \
+                 FROM documents d LEFT JOIN reading_progress p ON p.document_id = d.id \
+                 WHERE d.id = ?1",
+            )
+            .map_err(|e| db_err("准备文档详情查询失败", e))?;
+
+        let mut detail = stmt
+            .query_row(params![id], |row| {
+                let progress: Option<ProgressDto> = match row.get::<_, Option<i64>>(20)? {
+                    Some(_) => Some(ProgressDto {
+                        document_id: id,
+                        page_no: row.get(21)?,
+                        scroll_ratio: row.get(22)?,
+                        zoom: row.get(23)?,
+                        mode: match row.get::<_, String>(24)?.as_str() {
+                            "single" => ReadMode::Single,
+                            _ => ReadMode::Continuous,
+                        },
+                        updated_at: row.get(25)?,
+                    }),
+                    None => None,
+                };
+                Ok(DocumentDetailDto {
+                    id,
+                    library_root_id: row.get(1)?,
+                    file_name: row.get(2)?,
+                    rel_path: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    mtime_ms: row.get(5)?,
+                    page_count: row.get(6)?,
+                    pdf_title: row.get(7)?,
+                    pdf_author: row.get(8)?,
+                    meta_state: parse_meta_state(row.get::<_, String>(9)?),
+                    text_state: parse_text_state(row.get::<_, String>(10)?),
+                    last_opened_at: row.get(11)?,
+                    has_progress: progress.is_some(),
+                    progress_page: progress.as_ref().map(|p| p.page_no),
+                    abs_path: row.get(12)?,
+                    pdf_subject: row.get(13)?,
+                    pdf_keywords: row.get(14)?,
+                    pdf_producer: row.get(15)?,
+                    pdf_creator: row.get(16)?,
+                    pdf_creation_date: row.get(17)?,
+                    index_error_code: row.get(18)?,
+                    index_error_msg: row.get(19)?,
+                    bookmarks: Vec::<BookmarkDto>::new(),
+                    progress,
+                })
+            })
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    ApiError::new(ApiErrorCode::NotFound, "找不到该文献", false)
+                }
+                other => db_err("读取文档详情失败", other),
+            })?;
+
+        // 书签单独查，避免主查询过于复杂。
+        let mut bs = conn
+            .prepare(
+                "SELECT id, document_id, page_no, title, note, color, created_at, updated_at \
+                 FROM bookmarks WHERE document_id = ?1 ORDER BY page_no ASC, created_at ASC",
+            )
+            .map_err(|e| db_err("准备书签查询失败", e))?;
+        let bookmarks = bs
+            .query_map(params![id], |row| {
+                Ok(BookmarkDto {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    page_no: row.get(2)?,
+                    title: row.get(3)?,
+                    note: row.get(4)?,
+                    color: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| db_err("执行书签查询失败", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("读书签失败", e))?;
+        detail.bookmarks = bookmarks;
+        Ok(detail)
+    }
+
+    fn abs_path_of(&self, conn: &Connection, id: i64) -> Result<(String, Option<i64>, String, i64), ApiError> {
+        conn.query_row(
+            "SELECT abs_path, page_count, file_name, mtime_ms FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => ApiError::new(ApiErrorCode::NotFound, "找不到该文献", false),
+            other => db_err("读取文档路径失败", other),
+        })
+    }
+
+    fn delete_record(&self, conn: &Connection, id: i64) -> Result<(), ApiError> {
+        // 先清 FTS（无外键），再删文档行（级联清 page_text/bookmarks/progress/jobs）。
+        delete_document_index(conn, id)?;
+        let affected = conn
+            .execute("DELETE FROM documents WHERE id = ?1", params![id])
+            .map_err(|e| db_err("删除文档记录失败", e))?;
         if affected == 0 {
             return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该文献", false));
         }

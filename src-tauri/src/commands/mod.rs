@@ -1,3 +1,5 @@
+pub mod library;
+
 // Command 层只做参数校验 + DTO 转换，不写 SQL、不解析 PDF（docs/03 §M01）。
 //
 // 数据库可能不可用（目录不可写、迁移失败等）：此时返回 E_DB + detail，

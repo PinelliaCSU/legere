@@ -7,6 +7,7 @@ pub mod commands;
 pub mod contracts;
 pub mod db;
 pub mod error;
+pub mod library;
 pub mod logging;
 pub mod protocol;
 pub mod state;
@@ -204,7 +205,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::app_info,
-            commands::db_integrity_check
+            commands::db_integrity_check,
+            commands::library::library_root_list,
+            commands::library::library_root_add,
+            commands::library::library_root_remove,
+            commands::library::library_scan_start,
+            commands::library::document_list,
+            commands::library::document_recent,
+            commands::library::document_get,
+            commands::library::document_url,
+            commands::library::document_touch_opened,
+            commands::library::document_record_delete
         ])
         .run(tauri::generate_context!())
         .expect("Legere 启动失败");
