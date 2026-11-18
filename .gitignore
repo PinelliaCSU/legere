@@ -18,3 +18,5 @@ artifacts/
 diag-logs/
 .webview2/
 .appdata/
+.pnpm-store/
+
