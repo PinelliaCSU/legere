@@ -251,7 +251,16 @@ export async function subscribe<E extends keyof EventMap>(
 
 ## 6. `pdf://` 协议契约
 
-- URL：`pdf://doc/{documentId}?v={mtime_ms}`（`v` 用于避免 WebView 缓存陈旧内容）。
+- URL（**R21 修订**）：前端必须使用**平台映射形态**，不要直连 scheme。
+  - Windows：http://pdf.localhost/doc/{documentId}?v={mtime_ms}
+  - macOS / Linux：按 Tauri 在该平台的实际映射调整（通常为 pdf://localhost/doc/{id}）
+  - 后端 handler 同时接受 pdf://doc/{id}、pdf://localhost/doc/{id}、http://pdf.localhost/doc/{id} 三种形态并解析出同一 id；**document_url 命令必须返回当前平台可用的形态**。
+  - 实测依据（2026-11-18，release + 生产目录 + 真实页面）：前端用 pdf://doc/1 直接 fetch 得到 TypeError: Failed to fetch；用 http://pdf.localhost/doc/1 得到 200 / 带 Range 得到 206 + bytes 0-9/599。
+- **CORS（R21 新增，必需）**：页面源是 tauri://localhost，协议源不同，属跨源请求。响应必须带
+  Access-Control-Allow-Origin、Access-Control-Allow-Methods: GET, HEAD, OPTIONS、
+  Access-Control-Allow-Headers: range, if-range, accept, content-type、
+  Access-Control-Expose-Headers: content-range, accept-ranges, content-length, content-type；
+  并必须应答 OPTIONS 预检（Range 不在 CORS 安全列表内，会触发预检）。缺任一项，前端都是 Failed to fetch（请求能到后端，但 JS 读不到响应）。
 - 支持方法：`GET`、`HEAD`；必须处理 `Range: bytes=start-[end]`，返回 `206 Partial Content` + `Content-Range`；不支持 Range 时返回 `200` + 完整流（PDF.js 可退化为一次性加载）。
 - 响应头：`Content-Type: application/pdf`、`Accept-Ranges: bytes`、`Content-Length`。
 - 错误：文档不存在 → `404`；无权限 → `403`；路径逃逸（`..`）→ `400`（必须校验 id 而非拼接路径）；Range 越界或格式非法 → `416` + `Content-Range: bytes */{size}`。
@@ -447,6 +456,7 @@ export interface ReaderApi {
 | R16 | `library_root_remove.purge` 语义冻结：`false`=级联清记录，`true`=额外 `VACUUM`；**两种取值都不删用户磁盘文件**。并冻结 `db_reset` 为 debug-only、不进 `CMD` | 09 §6 / M04 §8 | M04 依此实现，M02 不把 `db_reset` 纳入比对集合 |
 | R17 | 路径唯一性改由 `*_key` 列承担：`documents` 增加 `abs_path_key`(UNIQUE) / `rel_path_key`，`UNIQUE(library_root_id, rel_path_key)`；`abs_path`/`rel_path` 仅用于展示与打开文件。Repository 的 `find_by_abs_path`/`find_by_rel_path` 更名为 `..._key` | 09 §8（Windows 大小写不敏感击穿 UNIQUE） | M03 迁移与 trait、M04 查重/JOIN 全部走 key 列 |
 | R19 | `bookmark_list` 未知 documentId 返回空数组；`progress_save` 未知 documentId 返回 `E_NOT_FOUND`（不做成外键 `E_DB`） | M12 §8 / 12 §4 | M12 依此实现，M14 不必为「文档已删」单独兜错 |
+| R21 | pdf:// 契约修订：① 前端必须用平台映射形态（Windows：http://pdf.localhost/doc/{id}）；② 响应必须带完整 CORS 头并应答 OPTIONS 预检；③ document_url 返回当前平台可用形态 | 08 §6 / M01 实测 | M01 协议实现、M04 的 document_url、M05 的 PDF.js 加载 |
 | R20 | `DocumentDto` 新增 `progressPage`（LEFT JOIN `reading_progress.page_no`）；主页转盘的 `HomeBook.progress` 收敛为 `{ pageNo }`，取消「60 次 `progress_get`」的数据源方案 | 13 §4 / M14 §9 | M04 的 `document_list/recent` 查询各加一列；M14 直接消费 |
 | R18 | 引擎类型与调度类型分文件归属：`src/pdf-engine/types.ts`（M05）与 `src/render/types.ts`（M06），禁止双写同义类型 | 05 §7 原注释把两类都指向 pdf-engine | M05/M06 各自只写自己那份 |
 

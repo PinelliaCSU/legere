@@ -39,7 +39,10 @@
 > 结论：
 > 1. **Windows 上的真实 URL 形态是 `pdf://localhost/doc/{id}`** —— scheme 之后的主机名固定为 `localhost`，不是原先假设的 `http://pdf.localhost/`。`parse_document_id` 已同时支持该形态与 `pdf://doc/{id}`，并有回归断言锁死（`protocol::tests`）。
 > 2. **Range 端到端可用**：带 `Range: bytes=0-9` → `206` + `Content-Range: bytes 0-9/599` + 10 字节；不带 Range → `200` + 完整 599 字节。浏览器接受 206，说明自定义协议的 Range 语义按契约 R15 生效。
-> 3. 因此 `docs/05 §6` 的协议契约无需修改；仅把「URL 形态待验证」从假设升级为已确认。
+> 3. **后续实测修正（同日，release + 生产目录 + 真实页面）**：前端若直接用 pdf://doc/1 fetch 会得到
+>    TypeError: Failed to fetch；改用 http://pdf.localhost/doc/1 则 200 / 带 Range 得 206 + bytes 0-9/599。
+>    跨源响应还必须带 CORS 头并应答 OPTIONS 预检，否则 JS 读不到响应。契约已按此修订为 **R21**（docs/05 §6）。
+>    结论：**后端 Range 语义正确；前端必须使用平台映射形态 URL**（Windows = http://pdf.localhost/...）。
 
 | ID | 待验证内容 | 探针（可执行、可判定） | 责任模块 |
 |---|---|---|---|
