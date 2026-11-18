@@ -73,7 +73,11 @@ mod tests {
         // 形态 A：scheme 后第一段就是 "doc"（pdf://doc/17）
         assert_eq!(parse_document_id("pdf://doc/17?v=1"), Some(17));
         assert_eq!(parse_document_id("pdf://doc/17"), Some(17));
-        // 形态 B：Windows 上常见的主机式 URL（pdf://pdf.localhost/doc/17）
+        // 形态 B：V-06 实测形态 —— Windows 上 Tauri 把 pdf:// 映射成 pdf://localhost/doc/N
+        // （2026-11-18 取证：日志中 uri=pdf://localhost/doc/1）
+        assert_eq!(parse_document_id("pdf://localhost/doc/17"), Some(17));
+        assert_eq!(parse_document_id("pdf://localhost/doc/17?v=1"), Some(17));
+        // 兼容 http://pdf.localhost 形态（旧假设，保留以避免回归）
         assert_eq!(parse_document_id("http://pdf.localhost/doc/17?v=1"), Some(17));
         assert_eq!(parse_document_id("http://pdf.localhost/doc/17"), Some(17));
         // 结尾斜杠与查询串不影响

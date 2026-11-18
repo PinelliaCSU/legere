@@ -14,13 +14,26 @@ use tauri::{Emitter, Manager};
 
 const PDF_SCHEME: &str = "pdf";
 
+// 窗口由代码创建而非 tauri.conf.json：只有程序化创建才能指定 WebView2 数据目录，
+// 而受限环境/便携模式下必须能把该目录指到可写位置（见 docs/18 §10）。
+const WINDOW_LABEL: &str = "main";
+const WINDOW_TITLE: &str = "Legere";
+const WINDOW_WIDTH: f64 = 1280.0;
+const WINDOW_HEIGHT: f64 = 860.0;
+const WINDOW_MIN_WIDTH: f64 = 960.0;
+const WINDOW_MIN_HEIGHT: f64 = 640.0;
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("legere"));
+            // 数据目录：默认 appDataDir；LEGERE_DATA_DIR 可覆盖（便携模式 / 受限环境调试）。
+            let data_dir = std::env::var_os("LEGERE_DATA_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    app.path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| std::env::temp_dir().join("legere"))
+                });
 
             // 日志句柄必须活到进程结束；用 manage 持有。
             match logging::init(&data_dir.join("logs")) {
@@ -53,6 +66,30 @@ pub fn run() {
                 Err(err) => {
                     eprintln!("数据库初始化失败: {err:?}");
                     return Err(Box::new(std::io::Error::other(format!("db init failed: {err:?}"))) as Box<dyn std::error::Error>);
+                }
+            }
+
+            // 建窗：数据目录可由 LEGERE_WEBVIEW_DATA_DIR 覆盖（默认交给 wry）。
+            let mut builder = tauri::WebviewWindowBuilder::new(
+                app,
+                WINDOW_LABEL,
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title(WINDOW_TITLE)
+            .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .min_inner_size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT);
+
+            if let Some(dir) = std::env::var_os("LEGERE_WEBVIEW_DATA_DIR") {
+                std::fs::create_dir_all(&dir).ok();
+                builder = builder.data_directory(std::path::PathBuf::from(dir));
+            }
+
+            match builder.build() {
+                Ok(_) => tracing::info!("窗口已创建"),
+                Err(err) => {
+                    // 建窗失败不 panic：让日志与命令仍可用，便于诊断环境问题。
+                    tracing::error!(?err, "窗口创建失败");
+                    eprintln!("window build failed: {err:?}");
                 }
             }
 
