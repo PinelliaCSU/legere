@@ -12,6 +12,8 @@ artifacts/
 .cargo/
 .cargo-home/
 .tmp/
+.target/
 .probe-logs/
+diag-logs/
 .webview2/
 .appdata/
