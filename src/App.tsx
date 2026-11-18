@@ -134,12 +134,48 @@ async function runSearchProbe(): Promise<LibProbe[]> {
   return out;
 }
 
+
+// M05 探针：用真实 pdfjs 打开 pdf:// 文档，验证 V-01 门禁结论（TextLayer/TextItem/Outline）。
+async function runEngineProbe(): Promise<LibProbe[]> {
+  const out: LibProbe[] = [];
+  try {
+    const { pdfEngine } = await import("./pdf-engine");
+    const handle = await pdfEngine.openDocument({ url: "http://pdf.localhost/doc/1?v=1", docId: 1 });
+    out.push({ step: "1 打开文档", detail: `pageCount=${handle.pageCount}` });
+
+    const page = await handle.getPage(1);
+    out.push({ step: "2 页面几何", detail: `${Math.round(page.geometry.widthPt)}×${Math.round(page.geometry.heightPt)}pt rotation=${page.geometry.rotation}` });
+
+    const text = await page.getTextContent();
+    out.push({ step: "3 文本内容", detail: `items=${text.items.length} chars=${text.text.length} 首段=「${text.text.trim().slice(0, 20)}」` });
+    out.push({ step: "4 itemStarts 可逆", detail: `${text.itemStarts.every((s, i) => text.text.slice(s, s + (text.items[i]?.str.length ?? 0)) === text.items[i]?.str)}` });
+
+    const meta = await handle.getMetadata();
+    out.push({ step: "5 元数据", detail: `title=${meta.title ?? "(空)"}` });
+
+    const outline = await handle.getOutline();
+    out.push({ step: "6 目录", detail: `nodes=${outline.length}` });
+
+    const task = page.render({ scale: 0.4 });
+    const canvas = await task.promise;
+    out.push({ step: "7 渲染位图", detail: `${canvas.width}×${canvas.height}px` });
+
+    await handle.dispose();
+    out.push({ step: "8 释放", detail: "dispose 完成" });
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    out.push({ step: "失败", detail: `${e.code ?? "no-code"}: ${e.message ?? String(err)}` });
+  }
+  return out;
+}
+
 export default function App(): ReactElement {
   const [status, setStatus] = useState<Status>({ kind: "probing" });
   const [readyEvent, setReadyEvent] = useState<string | null>(null);
   const [probes, setProbes] = useState<ProbeResult[]>([]);
   const [libProbes, setLibProbes] = useState<LibProbe[]>([]);
   const [searchProbes, setSearchProbes] = useState<LibProbe[]>([]);
+  const [engineProbes, setEngineProbes] = useState<LibProbe[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -172,6 +208,8 @@ export default function App(): ReactElement {
       if (alive) setLibProbes(lib);
       const searchLine = await runSearchProbe();
       if (alive) setSearchProbes(searchLine);
+      const engineLine = await runEngineProbe();
+      if (alive) setEngineProbes(engineLine);
     })();
     return () => {
       alive = false;
@@ -203,6 +241,15 @@ export default function App(): ReactElement {
   return (
     <main>
       <h1>Legere</h1>
+          <h2>引擎探针（M05）</h2>
+          <ul>
+            {engineProbes.map((p) => (
+              <li key={p.step}>
+                <strong>{p.step}</strong>：{p.detail}
+              </li>
+            ))}
+          </ul>
+
           <h2>检索链探针（M09–M11）</h2>
           <ul>
             {searchProbes.map((p) => (
