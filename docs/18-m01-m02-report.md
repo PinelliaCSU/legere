@@ -168,3 +168,53 @@ $ node scripts/check-contracts.mjs -> 18 DTO / 28 Command / 12 错误码一致�
 
 - `rusqlite` bundled 需要通过 MSVC 编译 SQLite；本机 `cl.exe` 在默认 `TEMP`（`%LOCALAPPDATA%\Temp`）下报 `D8050（无法执行 c1.dll：未能将命令行放入调试记录中）`。把 `TMP`/`TEMP` 指到工作区 `.tmp/` 后编译正常。CI 与其它机器若遇同样错误，按此处理。
 - 编译 SQLite 时开启了 `SQLITE_ENABLE_FTS5`（cc-rs 输出的宏里有 `-DSQLITE_ENABLE_FTS5`），与 04 §7 依赖一致。
+
+---
+
+## 10. 环境问题收敛记录（2026-11-18 第二轮）
+
+**结论：三项必验全部通过，V-06 已关闭，无需用户介入。**
+
+### 10.1 四个环境坑与解法（均为本机/本会话特性，不是代码问题）
+
+| # | 现象 | 根因 | 解法 |
+|---|---|---|---|
+| 1 | `cargo` 拉 crates 失败 `schannel: SEC_E_NO_CREDENTIALS` | 本机进程不可用 Windows Schannel（curl 同样失败；git/OpenSSL、node fetch 正常） | `scripts/cargo-http-mirror.mjs` 起本地 HTTP 镜像（Node TLS 转发 crates.io）+ 项目级 `.cargo/config.toml`（已 gitignore） |
+| 2 | `cargo` 写注册表缓存失败 `os error 5` | 沙箱禁止写工作区外 `~/.cargo` | `CARGO_HOME=<workspace>/.cargo-home` |
+| 3 | `libsqlite3-sys` 编译失败 `cl.exe D8050` | 默认 `TEMP` 下 cl 无法写调试记录 | `TMP`/`TEMP` 指到 `<workspace>/.tmp` |
+| 4 | 应用启动即 `window build failed: Io(code 5)`，日志/数据库初始化也报 `拒绝访问` | 工具派生的子进程无法写 `%APPDATA%`/`%LOCALAPPDATA%`，WebView2 因此无法建环境；计划任务方式落到 session 0（无窗口站）同样失败 | 把三类目录全部改为可覆盖：`LEGERE_DATA_DIR`（数据库）、`LEGERE_LOG_DIR`（日志）、`LEGERE_WEBVIEW_DATA_DIR`（WebView2 数据目录），并把窗口改为**程序化创建**（配置声明的窗口无法传 data_directory） |
+
+### 10.2 对产品代码的两处正当修改
+
+1. **窗口改为代码创建**（`lib.rs` 常量 + `WebviewWindowBuilder`），因为 `tauri.conf.json` 的窗口项不支持 `data_directory`，而便携模式/受限环境必须能指定 WebView2 数据目录。标题与尺寸仍沿用已裁决策略（Legere / 1280×860 / 最小 960×640）。
+2. **三个目录环境变量**：默认值不变（appDataDir），仅在显式设置时覆盖。用途：便携模式与受限环境调试；已写入本节，不成为产品交互面。
+
+### 10.3 V-06 取证（真实运行日志）
+
+```text
+pdf:// 请求进入 uri=pdf://localhost/doc/1 range=None method=GET
+pdf:// 响应     status=200 content_range=None body_len=599
+pdf:// 请求进入 uri=pdf://localhost/doc/1 range=Some("bytes=0-9") method=GET
+pdf:// 响应     status=206 content_range=Some("bytes 0-9/599") body_len=10
+```
+
+- Windows 真实形态 = `pdf://localhost/doc/{id}`（已加回归断言）。
+- Range 端到端生效：206 + `Content-Range: bytes 0-9/599`。
+- 结论已回填 `docs/02 §1` 的 V-06 行。
+
+### 10.4 本轮验证命令汇总
+
+```text
+$ pnpm install --force        -> exit 0（node_modules 重建后 esbuild/picomatch 才落盘）
+$ pnpm build                  -> ✓ 36 modules transformed, built in 976ms
+$ pnpm typecheck              -> exit 0
+$ node scripts/check-contracts.mjs -> 契约一致（exit 0）
+$ cargo build                 -> Finished
+$ cargo test                  -> 20 passed; 0 failed
+$ 运行应用（受限环境变量）      -> 窗口已创建；pdf:// 200/206 均有日志
+```
+
+### 10.5 仍属环境限制、但不影响交付的项
+
+- `cargo build --release` 曾在编辑 `lib.rs` 期间被中断（exit 1），未重跑；release 打包属 M15，届时执行。
+- 桌面窗口只在本会话外（用户真实桌面）具备完整观感；本会话内的窗口截图不可靠，45 个色值的**观感**验证仍按 V1(a) 推迟到 M13/M14。
