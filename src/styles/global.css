@@ -117,6 +117,11 @@ body {
 /* ── 文献库（安静克制的列表：极淡斑马 + 悬停，不加卡片阴影） ── */
 .lg-library { position: absolute; inset: 0; padding: 20px 24px; overflow: auto; background: var(--lg-bg-app); }
 .lg-library-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+.lg-filter {
+  flex: 1; min-width: 140px; max-width: 320px; padding: 6px 10px; font-size: 13px;
+  border: 1px solid var(--lg-border-strong); border-radius: 6px;
+  background: var(--lg-bg-surface); color: var(--lg-fg-primary);
+}
 .lg-doc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .lg-doc-list li:nth-child(even) button { background: color-mix(in oklab, var(--lg-bg-surface) 55%, transparent); }
 .lg-doc-list button {
@@ -366,9 +371,16 @@ body {
   background: var(--lg-bg-surface); color: var(--lg-fg-secondary); cursor: pointer; font-size: 13px;
 }
 .lg-theme-choices button.is-active { border-color: var(--lg-accent); color: var(--lg-fg-primary); font-weight: 600; }
+.lg-keymap-group { margin-bottom: 14px; }
+.lg-keymap-group:last-child { margin-bottom: 0; }
+.lg-keymap-group h3 {
+  margin: 0 0 6px; font-size: 12px; font-weight: 600;
+  color: var(--lg-fg-secondary); letter-spacing: 0.04em;
+}
 .lg-keymap { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .lg-keymap li { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--lg-fg-secondary); }
-.lg-keymap span { margin-left: 10px; }
+.lg-keymap li > span:first-of-type { margin-left: 10px; }
+.lg-keymap-note { margin-left: 8px; font-size: 11px; color: var(--lg-fg-muted); }
 .lg-keymap kbd {
   font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-secondary);

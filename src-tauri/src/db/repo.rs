@@ -312,10 +312,19 @@ impl DocumentRepo for SqlRepos {
             _ => "COALESCE(d.last_opened_at, d.created_at)",
         };
         let dir = if order.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" };
-        let pattern = text.map(|t| format!("%{}%", t.replace('%', "").replace('_', "")));
+        // LIKE 的通配符必须**转义**而不是删掉：删掉会让「文件名里带 _ 或 %」的文献
+        // 用自己的名字搜不到（本库大部分文件名是 _ 分隔的，等于过滤框对它们完全失效）。
+        // 转义后配合 ESCAPE '\'，用户输入的 % 和 _ 就是普通字符。
+        let pattern = text.map(|t| {
+            let escaped = t
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        });
 
         let count_sql = "SELECT COUNT(*) FROM documents d WHERE d.deleted_at IS NULL \
-                         AND (?1 IS NULL OR d.file_name LIKE ?1 OR COALESCE(d.pdf_title,'') LIKE ?1)";
+                         AND (?1 IS NULL OR d.file_name LIKE ?1 ESCAPE '\\' OR COALESCE(d.pdf_title,'') LIKE ?1 ESCAPE '\\')";
         let total: i64 = conn
             .query_row(count_sql, params![pattern], |row| row.get(0))
             .map_err(|e| db_err("统计 documents 失败", e))?;
@@ -326,7 +335,7 @@ impl DocumentRepo for SqlRepos {
                     d.last_opened_at, (p.document_id IS NOT NULL), p.page_no \
              FROM documents d LEFT JOIN reading_progress p ON p.document_id = d.id \
              WHERE d.deleted_at IS NULL \
-               AND (?1 IS NULL OR d.file_name LIKE ?1 OR COALESCE(d.pdf_title,'') LIKE ?1) \
+               AND (?1 IS NULL OR d.file_name LIKE ?1 ESCAPE '\\' OR COALESCE(d.pdf_title,'') LIKE ?1 ESCAPE '\\') \
              ORDER BY {order_sql} {dir}, d.id {dir} LIMIT ?2 OFFSET ?3"
         );
 

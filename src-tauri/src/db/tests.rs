@@ -352,3 +352,69 @@ fn purge_also_removes_soft_deleted_rows_that_would_block_the_unique_key() {
         .expect("清理后应能插入新文件夹的同名文件");
     assert!(fresh > 0);
 }
+
+// ── 文献库过滤：LIKE 通配符必须转义（本轮修的真实 bug）────────────────────────
+// 旧实现把查询里的 % 和 _ 直接删掉，导致「文件名带下划线的文献用完整名字搜不到」。
+// 本库大部分文件名是 _ 分隔的，等于过滤框对它们完全失效。
+
+fn seed_named(db: &Db, rel: &str) -> i64 {
+    let repos = SqlRepos;
+    db.with_write(|conn| {
+        let root = repos.list(conn)?.into_iter().next();
+        let root_id = match root {
+            Some(r) => r.id,
+            None => repos.add(conn, "C:/filter", "filter")?.id,
+        };
+        repos.insert_found(
+            conn,
+            NewDocument {
+                library_root_id: root_id,
+                rel_path: rel,
+                abs_path: &format!("C:/filter/{rel}"),
+                file_name: rel,
+                size_bytes: 1,
+                mtime_ms: 1,
+            },
+        )
+    })
+    .expect("写入文档")
+}
+
+#[test]
+fn document_filter_treats_underscore_as_a_literal_character() {
+    let (db, _path) = open_db("filter-like");
+    let repos = SqlRepos;
+    seed_named(&db, "黑格尔《逻辑学》中的质与量的诞生_第一卷_中文译本.pdf");
+    seed_named(&db, "另一个 文件.pdf");
+
+    db.with_read(|conn| {
+        // 1) 用完整文件名（含 _）必须能搜到
+        let full = repos.list_filtered(
+            conn,
+            Some("黑格尔《逻辑学》中的质与量的诞生_第一卷_中文译本.pdf"),
+            "recent",
+            "desc",
+            0,
+            50,
+        )?;
+        assert_eq!(full.total, 1, "含下划线的完整文件名必须能命中");
+
+        // 2) 子串（含 _）也能命中
+        let part = repos.list_filtered(conn, Some("_第一卷_"), "recent", "desc", 0, 50)?;
+        assert_eq!(part.total, 1);
+
+        // 3) 下划线是字面量，不是单字符通配符
+        let wildcard = repos.list_filtered(conn, Some("诞生_第二卷"), "recent", "desc", 0, 50)?;
+        assert_eq!(wildcard.total, 0, "下划线不能被当成通配符");
+
+        // 4) % 同理，不会被当成「匹配任意」
+        let percent = repos.list_filtered(conn, Some("%"), "recent", "desc", 0, 50)?;
+        assert_eq!(percent.total, 0, "百分号必须按字面量处理");
+
+        // 5) 不带文本 = 不过滤
+        let all = repos.list_filtered(conn, None, "recent", "desc", 0, 50)?;
+        assert_eq!(all.total, 2);
+        Ok(())
+    })
+    .expect("断言过滤语义");
+}

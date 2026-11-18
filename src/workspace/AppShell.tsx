@@ -3,11 +3,11 @@
 // 遗留项处理：「事件 + 拉取」双保险——app://ready 只在页面加载瞬间发一次，容易早于订阅，
 // 因此这里先拉 ping/app_info，再订阅事件作为后续通知来源（不再依赖单一事件判断就绪）。
 
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import { CMD } from "../contracts/cmd";
 import { EVT } from "../contracts/evt";
-import type { DocumentDto, LibraryRootDto, TextState } from "../contracts/types";
+import type { DocumentDto, LibraryRootDto, ReadMode, TextState } from "../contracts/types";
 import { call, subscribe } from "../core/ipc";
 import { ReaderView, type ReaderApi } from "../reader/ReaderView";
 import { searchPages, type DocSearchHit } from "../reader/search/doc-search";
@@ -15,6 +15,16 @@ import { useTheme } from "../theme/ThemeProvider";
 import type { ThemeName } from "../theme/tokens";
 import { HomeSpace, spineColorFor, type HomeBook } from "./HomeSpace";
 import { rootLabel } from "./library-roots";
+import { KEYMAP, keymapEntryCount } from "../settings/keymap";
+import {
+  DEFAULT_MODE_OPTIONS,
+  DEFAULT_SCALE_OPTIONS,
+  READER_DEFAULT_MODE_KEY,
+  READER_DEFAULT_SCALE_KEY,
+  formatScaleOption,
+  parseDefaultMode,
+  parseDefaultScale,
+} from "../settings/reader-prefs";
 import { RootRemoveDialog, RootRenameDialog, RootReplaceDialog } from "./LibraryDialogs";
 import { useAppStore } from "./router";
 
@@ -55,21 +65,52 @@ export function AppShell(): ReactElement {
   const [addPath, setAddPath] = useState("");
   const [busy, setBusy] = useState("");
   const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null);
+  /// 文献库过滤词：走后端 document_list（按文件名/标题 LIKE），不是前端假过滤。
+  const [filter, setFilter] = useState("");
+  const [filterTotal, setFilterTotal] = useState<number | null>(null);
+  const filterRef = useRef("");
+  /// 阅读默认值（设置项 reader.defaultMode / reader.defaultScale）。
+  const [defaultMode, setDefaultMode] = useState<ReadMode>("continuous");
+  const [defaultScale, setDefaultScale] = useState(1);
 
+
+  /// 拉文献列表：有过滤词就走 document_list（后端按 file_name/pdf_title 做 LIKE），
+  /// 否则走 document_recent（主页转盘也吃这份数据）。
+  const loadDocuments = useCallback(async (text: string) => {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      setFilterTotal(null);
+      setDocuments(await call(CMD.DOCUMENT_RECENT, { limit: 100 }));
+      return;
+    }
+    const page = await call(CMD.DOCUMENT_LIST, {
+      query: { text: trimmed, sort: "recent", order: "desc", offset: 0, limit: 200 },
+    });
+    setDocuments(page.items);
+    setFilterTotal(page.total);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      const [page, rootList] = await Promise.all([
-        call(CMD.DOCUMENT_RECENT, { limit: 100 }),
+      const [, rootList] = await Promise.all([
+        loadDocuments(filterRef.current),
         call(CMD.LIBRARY_ROOT_LIST, {}),
       ]);
-      setDocuments(page);
       setRoots(rootList);
     } catch (err) {
       const e = err as { code?: string };
       setStatus("读取文献库失败：" + (e.code ?? "E_INTERNAL"));
     }
-  }, []);
+  }, [loadDocuments]);
+
+  // 过滤词变化 → 250ms 防抖后重新查询（每敲一个字符都查一次会把索引打满）。
+  useEffect(() => {
+    filterRef.current = filter;
+    const timer = window.setTimeout(() => {
+      void loadDocuments(filter).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [filter, loadDocuments]);
 
   // 就绪：拉取 + 订阅（双保险）
   useEffect(() => {
@@ -98,6 +139,25 @@ export function AppShell(): ReactElement {
       for (const dispose of disposers) dispose();
     };
   }, [refresh]);
+
+  // 阅读默认值：进应用时读一次（设置页展示）；写入走 settings_set。
+  useEffect(() => {
+    void (async () => {
+      try {
+        const all = await call(CMD.SETTINGS_GET_ALL, {});
+        const mode = parseDefaultMode(all[READER_DEFAULT_MODE_KEY]);
+        if (mode !== null) setDefaultMode(mode);
+        const scale = parseDefaultScale(all[READER_DEFAULT_SCALE_KEY]);
+        if (scale !== null) setDefaultScale(scale);
+      } catch {
+        // 设置读失败不阻塞界面，保持默认值。
+      }
+    })();
+  }, []);
+
+  const persistSetting = useCallback((key: string, value: string) => {
+    void call(CMD.SETTINGS_SET, { key, value }).catch(() => undefined);
+  }, []);
 
   // 右键不再弹 WebView 自带的菜单（重新加载/另存为/检查——那是调试菜单，不是桌面应用的菜单）。
   // 阅读器会把它换成自己的功能面板（见 ReaderView 的 contextmenu 处理）；
@@ -266,7 +326,19 @@ export function AppShell(): ReactElement {
               <button type="button" className="lg-btn" onClick={() => setAddOpen(true)}>添加文献库</button>
               <button type="button" className="lg-btn" onClick={() => void reindexAll()} disabled={busy !== ""}>重建索引</button>
               <button type="button" className="lg-btn" onClick={() => void refresh()}>刷新</button>
-              <span className="lg-muted">{documents.length} 本</span>
+              <input
+                className="lg-filter"
+                type="search"
+                value={filter}
+                placeholder="按文件名或标题过滤"
+                onChange={(e) => setFilter(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setFilter("");
+                }}
+              />
+              <span className="lg-muted">
+                {filterTotal !== null ? filterTotal + " 本匹配" : documents.length + " 本"}
+              </span>
             </div>
             <section className="lg-roots" aria-label="文献库">
               <header className="lg-roots-head">
@@ -351,15 +423,63 @@ export function AppShell(): ReactElement {
               </div>
             </section>
             <section className="lg-settings-section">
-              <h2>快捷键</h2>
-              <ul className="lg-keymap">
-                <li><kbd>Ctrl</kbd><kbd>K</kbd><span>文献库搜索</span></li>
-                <li><kbd>Ctrl</kbd><kbd>F</kbd><span>文内搜索</span></li>
-                <li><kbd>←</kbd><kbd>→</kbd><span>上一页 / 下一页</span></li>
-                <li><kbd>Ctrl</kbd><kbd>+</kbd><kbd>-</kbd><span>缩放</span></li>
-                <li><kbd>M</kbd><span>连续 / 单页切换</span></li>
-                <li><kbd>Esc</kbd><span>退出阅读模式</span></li>
-              </ul>
+              <h2>阅读</h2>
+              <div className="lg-row">
+                <span className="lg-row-label">默认阅读模式</span>
+                <div className="lg-theme-choices">
+                  {DEFAULT_MODE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={defaultMode === option.value ? "is-active" : ""}
+                      onClick={() => {
+                        setDefaultMode(option.value);
+                        persistSetting(READER_DEFAULT_MODE_KEY, option.value);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="lg-muted">仅对还没有阅读进度的文献生效</span>
+              </div>
+              <div className="lg-row">
+                <span className="lg-row-label">默认缩放</span>
+                <div className="lg-theme-choices">
+                  {DEFAULT_SCALE_OPTIONS.map((scale) => (
+                    <button
+                      key={scale}
+                      type="button"
+                      className={defaultScale === scale ? "is-active" : ""}
+                      onClick={() => {
+                        setDefaultScale(scale);
+                        persistSetting(READER_DEFAULT_SCALE_KEY, String(scale));
+                      }}
+                    >
+                      {formatScaleOption(scale)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+            <section className="lg-settings-section">
+              <h2>快捷键（{keymapEntryCount()} 条）</h2>
+              {KEYMAP.map((group) => (
+                <div className="lg-keymap-group" key={group.title}>
+                  <h3>{group.title}</h3>
+                  <ul className="lg-keymap">
+                    {group.entries.map((entry) => (
+                      <li key={group.title + ":" + entry.keys.join("+") + ":" + entry.label}>
+                        {entry.keys.map((key, index) => (
+                          <kbd key={key + index}>{key}</kbd>
+                        ))}
+                        <span>{entry.label}</span>
+                        {entry.note !== undefined ? <span className="lg-keymap-note">{entry.note}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </section>
           </section>
         ) : null}

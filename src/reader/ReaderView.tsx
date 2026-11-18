@@ -22,6 +22,12 @@ import { API_ERROR_TEXT, isApiErrorCode } from "../contracts/errors";
 import { pdfEngine } from "../pdf-engine";
 import type { DocumentHandle, PageGeometry, TextContentHandle } from "../pdf-engine/types";
 import { anchorScrollTop, createRenderScheduler, computePageBoxes, currentPageAt, PAGE_GAP, READER_PADDING, type PageRenderState, type ReadMode } from "../render";
+import {
+  READER_DEFAULT_MODE_KEY,
+  READER_DEFAULT_SCALE_KEY,
+  parseDefaultMode,
+  parseDefaultScale,
+} from "../settings/reader-prefs";
 import { BookmarkDrawer } from "./BookmarkDrawer";
 import { mountHighlights } from "./highlight";
 import { searchPages, type DocSearchHit } from "./search/doc-search";
@@ -128,6 +134,18 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
             }
             if (progress.mode === "single" || progress.mode === "continuous") setMode(progress.mode);
             if (typeof progress.pageNo === "number" && progress.pageNo > 1) setResumePage(progress.pageNo);
+          } else if (alive) {
+            // 这本书还没有进度：用设置里的「默认阅读模式 / 默认缩放」。
+            // 已经读过一次的书不再受默认值影响 —— 用户在书里调过的东西优先。
+            try {
+              const all = await call(CMD.SETTINGS_GET_ALL, {});
+              const mode = parseDefaultMode(all[READER_DEFAULT_MODE_KEY]);
+              if (mode !== null) setMode(mode);
+              const scale = parseDefaultScale(all[READER_DEFAULT_SCALE_KEY]);
+              if (scale !== null) setScale(clampScale(scale));
+            } catch {
+              // 默认值读不到就用内置默认（连续 + 100%）。
+            }
           }
         } catch {
           // 忽略：进度只是锦上添花。
