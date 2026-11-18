@@ -1,16 +1,124 @@
-/* 主题令牌由 M13 提供（docs/15-theme-tokens.md）。
-   M01 阶段不写任何颜色/间距/字体数值，只做最基本的排版复位。 */
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
-}
-
+/* 主题令牌由 M13 提供（docs/15-theme-tokens.md）。组件只允许用 var(--lg-*)。 */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
 body {
   font-family: var(--lg-font-ui, system-ui, sans-serif);
+  background: var(--lg-bg-app, #F5F7F9);
+  color: var(--lg-fg-primary, #1B2430);
 }
+
+/* ── 外壳 ── */
+.lg-shell { display: flex; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
+.lg-header {
+  display: flex; align-items: center; gap: 24px;
+  padding: 10px 20px; border-bottom: 1px solid var(--lg-border-subtle);
+  background: var(--lg-bg-surface);
+}
+.lg-brand { letter-spacing: 0.04em; }
+.lg-nav { display: flex; gap: 4px; }
+.lg-nav button {
+  border: none; background: transparent; color: var(--lg-fg-secondary);
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+.lg-nav button.is-active { background: var(--lg-bg-app); color: var(--lg-fg-primary); font-weight: 600; }
+.lg-status { margin-left: auto; font-size: 12px; color: var(--lg-fg-muted); }
+/* min-width:0 + width:100% 是必需的：flex column 子项默认 min-width:auto，
+   会被内容撑宽，导致 .lg-home 的 clientWidth 大于视口（实测 1700 vs 1295），
+   环心因此偏移到右侧。 */
+.lg-main { position: relative; flex: 1; overflow: hidden; width: 100%; min-width: 0; }
+.lg-muted { color: var(--lg-fg-muted); font-size: 12px; }
+
+.lg-btn {
+  padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
+}
+.lg-btn-primary { background: var(--lg-accent); color: var(--lg-accent-fg); border-color: var(--lg-accent); }
+
+/* ── 主页转盘（docs/13） ── */
+.lg-home { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; }
+.lg-home-ring {
+  position: absolute; border-radius: 50%;
+  border: 2px solid var(--lg-accent); opacity: 0.35; pointer-events: none;
+}
+.lg-spine {
+  position: absolute; left: 0; top: 0; padding: 0; border: none; cursor: pointer;
+  border-radius: 2px; display: flex; align-items: center; justify-content: center;
+  color: rgba(255, 255, 255, 0.92); overflow: hidden;
+  transform-origin: center center;
+}
+.lg-spine.is-focused { outline: 2px solid var(--lg-accent-fg); box-shadow: 0 0 0 3px var(--lg-accent); }
+.lg-spine-title { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.08em; }
+.lg-home-focused {
+  position: absolute; transform: translateX(-50%); text-align: center;
+  display: flex; flex-direction: column; gap: 4px; pointer-events: none;
+}
+.lg-home-focused strong { font-size: 16px; }
+.lg-home-focused span { font-size: 12px; color: var(--lg-fg-secondary); }
+.lg-home-empty { display: flex; align-items: center; justify-content: center; }
+.lg-home-empty-card { text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+
+/* ── 文献库 ── */
+.lg-library { position: absolute; inset: 0; padding: 20px; overflow: auto; }
+.lg-library-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+.lg-doc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.lg-doc-list button {
+  width: 100%; display: flex; gap: 12px; align-items: baseline; text-align: left;
+  padding: 8px 10px; border: none; background: transparent; color: inherit; cursor: pointer; border-radius: 6px;
+}
+.lg-doc-list button:hover { background: var(--lg-bg-surface); }
+.lg-doc-title { font-size: 14px; }
+
+/* ── 阅读器（D15/D16：无工具栏 + 底部胶囊） ── */
+.lg-reader { position: absolute; inset: 0; overflow: auto; background: var(--lg-page-bg); padding: 32px 0; }
+.lg-reader-status { text-align: center; color: var(--lg-fg-muted); }
+.lg-page {
+  position: relative; margin: 0 auto 12px;
+  background: #FFFFFF;
+  border: 1px solid var(--lg-page-border);
+  box-shadow: var(--lg-page-shadow, 0 1px 2px rgba(16,24,32,.06), 0 6px 16px rgba(16,24,32,.05));
+}
+.lg-page-canvas { position: absolute; inset: 0; }
+.lg-page-canvas canvas { display: block; width: 100%; height: 100%; }
+.lg-page-placeholder { position: absolute; inset: 0; background: var(--lg-bg-surface); opacity: 0.5; }
+.lg-text-layer { color: transparent; }
+.lg-text-layer span::selection { background: color-mix(in oklab, var(--lg-accent) 35%, transparent); }
+.lg-page-capsule {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  padding: 4px 12px; border-radius: 999px; font-size: 12px;
+  background: color-mix(in oklab, var(--lg-bg-elevated) 88%, transparent);
+  color: var(--lg-fg-secondary); border: 1px solid var(--lg-border-subtle);
+  pointer-events: none;
+}
+.lg-float-btn {
+  position: fixed; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 40px; border-radius: 50%; z-index: 30;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-elevated);
+  color: var(--lg-fg-primary); font-size: 20px; cursor: pointer; opacity: 0.6;
+}
+.lg-float-btn:hover { opacity: 1; }
+.lg-float-left { left: 24px; }
+.lg-float-right { right: 24px; }
+
+/* ── 全局搜索浮层（D23：居中 720px，距顶 15vh） ── */
+.lg-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.28); display: flex; justify-content: center; }
+.lg-overlay-panel {
+  margin-top: 15vh; width: min(720px, 90vw); max-height: 60vh; overflow: auto;
+  background: var(--lg-bg-elevated); border-radius: 8px; padding: 16px;
+  border: 1px solid var(--lg-border-subtle);
+}
+.lg-overlay-panel input {
+  width: 100%; padding: 8px 10px; font-size: 15px;
+  border: 1px solid var(--lg-border-strong); border-radius: 6px;
+  background: var(--lg-bg-surface); color: var(--lg-fg-primary);
+}
+.lg-search-results { list-style: none; margin: 12px 0 0; padding: 0; }
+.lg-search-results ul { list-style: none; padding-left: 12px; margin: 4px 0; }
+.lg-search-results button { border: none; background: transparent; color: var(--lg-fg-secondary); text-align: left; cursor: pointer; padding: 2px 0; }
+
+/* ── 设置 ── */
+.lg-settings { position: absolute; inset: 0; padding: 20px; overflow: auto; }
+.lg-row { display: flex; align-items: center; gap: 16px; padding: 8px 0; }
+.lg-theme-choices { display: flex; gap: 6px; }
+.lg-theme-choices button { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: inherit; cursor: pointer; }
+.lg-theme-choices button.is-active { border-color: var(--lg-accent); font-weight: 600; }
+.lg-boot { padding: 40px; text-align: center; color: var(--lg-fg-muted); }

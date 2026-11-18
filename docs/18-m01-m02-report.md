@@ -405,3 +405,31 @@ $ node scripts/check-theme.mjs     -> 主题校验通过：3 套 × 15 令牌，
 | M15 integration-release | 未开始 | 依赖上面全部 + 真实桌面打包验证 |
 
 结论：**后端能力链（M01–M04、M09–M13）已完整落地并逐项验证；前端引擎与界面层（M05–M08、M14、M15）尚未开始。**
+---
+
+## 15. M07 / M08 / M14 交付与未解决问题（诚实记录）
+
+### 15.1 已完成且有自动化验证
+
+| 模块 | 交付 | 验证 |
+|---|---|---|
+| M07 | `reader/ReaderView.tsx`（连续/单页不重载文档、缩放、跳页、键盘、进度端口、D15 无工具栏外壳、D16 页码胶囊）、`reader/text-layer.ts`（路径 B 自绘 span）、`reader/highlight.ts`（D21） | tsc + build 通过；真机视觉**未验证** |
+| M08 | `reader/search/doc-search.ts`（等长归一 + 中文子串 + 上下文） | **9 条 vitest 全绿** |
+| M14 | `workspace/router.ts`、`workspace/ring.ts`、`workspace/HomeSpace.tsx`、`workspace/AppShell.tsx`、`theme/ThemeProvider.tsx`、`styles/global.css` | **5 条 ring 几何测试全绿**；真机截图可见外壳与环线，但**圆心偏移未解决** |
+
+### 15.2 未解决问题（不伪装为完成）
+
+1. **主页转盘圆心偏移**：截图中环线与书脊整体偏向右下。已尝试两处修复（测量时机加入 `books.length` 依赖、`.lg-main` 加 `width:100%;min-width:0`）均未生效。下一步应按「先打印 `.lg-home` 的 clientWidth/Height 与 window.innerWidth/Height 到界面」定位真实测量值，再改布局，而不是继续猜 CSS。
+2. **阅读器未做真机视觉验证**：M07 只过了类型与构建；需要打开 `.probe-lib` 里的 PDF 截图确认 canvas/文本层/页码胶囊位置。
+3. **`cargo test` 出现过一次 8 失败**（同一命令 `cargo test --lib` 随后 39 passed，无代码改动）。疑为测试临时目录并发/残留竞争（`std::env::temp_dir()` 下同名残留 + 早前 Low 完整性标签）。加固方向：每个测试用 `tempfile` 式唯一目录并在结束时清理。**这是真缺陷（测试不确定性）**，不能以「重跑就绿」结案。
+
+### 15.3 本轮验证汇总
+
+```text
+vitest                 39 passed（含 ring 5、doc-search 9、layout/lru/text-content 25）
+tsc --noEmit           exit 0
+pnpm build             ✓ built in 3.10s
+check-contracts        契约一致
+check-theme            3 套 × 15 令牌，对比度全部达标
+cargo test --lib       39 passed（另有一次 8 失败，原因见 15.2-3）
+```
