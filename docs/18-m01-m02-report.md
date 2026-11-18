@@ -254,3 +254,36 @@ $ cargo build --release                -> Finished release profile
 
 - 本会话能复现"窗口创建被拒"的分支：日志与错误会落到可写回退目录，不再静默。
 - 用户桌面上的最终确认待其运行 `诊断.cmd` 回传输出（生产 `appDataDir` 与 WebView2 默认目录只能在真实交互桌面验证）。
+---
+
+## 12. 「双击后什么都没有」最终定位与全链路打通（2026-11-18 收官）
+
+### 12.1 三个真 bug（都在产品代码里，不是环境）
+
+| # | bug | 现象 | 修复 |
+|---|---|---|---|
+| 1 | release 未启用 `custom-protocol` | 窗口里显示「localhost 拒绝连接 / ERR_CONNECTION_REFUSED」——release 仍在加载 `build.devUrl` | Cargo.toml 增加 `custom-protocol = ["tauri/custom-protocol"]`；release 构建必须带 `--features custom-protocol`（`tauri build` 会自动带） |
+| 2 | `pdf://` 响应无 CORS | 后端日志有 200/206，前端 `TypeError: Failed to fetch` | 响应补 `Access-Control-Allow-Origin/Methods/Headers/Expose-Headers`，并对 `OPTIONS` 返回 204 预检 |
+| 3 | setup 失败即 panic | release 无控制台 → panic 不可见 → 用户看到「双击，什么都没发生」 | 启动顺序改为 目录 → 日志 → 窗口 → 数据库；DB 失败降级为 `E_DB`+detail；panic hook 落文件 |
+
+### 12.2 两个环境特性（已确认为本机特有，不改产品语义）
+
+1. 本构建环境产出的文件带 **Low 完整性标签 + NW**：exe 被以 Low IL 运行时写不了 `%APPDATA%`、起不了 WebView2。**实测解法**：`icacls <exe> /setintegritylevel M`。用户自行 `cargo build` 不会带这个标签。
+2. Windows 上自定义协议的**前端可用形态**是 `http://pdf.localhost/doc/{id}`；`pdf://doc/{id}` 直连必然失败。已写入契约 R21。
+
+### 12.3 最终验收（release + 生产数据目录 + 真实页面，截图可复现）
+
+```text
+前端探针（界面上直接可见）：
+  平台映射形态 无 Range        -> status=200 content-range=(none) accept-ranges=bytes bytes=599
+  平台映射形态 Range 0-9       -> status=206 content-range=bytes 0-9/599 bytes=10
+  pdf:// 直连（预期失败）      -> fetch 失败: TypeError: Failed to fetch
+后端日志：
+  Legere 启动 / 数据目录已选定 C:\Users\Lenovo\AppData\Roaming\com.legere.reader / 窗口已创建 / 数据库就绪 fts5=true contentless_delete=true
+  pdf:// 请求进入 uri=pdf://localhost/doc/1 range=Some("bytes=0-9") -> 响应 status=206 content_range=Some("bytes 0-9/599")
+```
+
+### 12.4 已知小问题（不影响开工）
+
+- `app://ready` 仍在 React 订阅前发出 → 冒烟壳显示「未收到」。可用性已由 `ping`/`app_info` 覆盖；M14 接入 `AppShell` 时统一改为「事件 + 拉取」双保险。
+- 截图能力已验证可用（`PrintWindow` + `PW_RENDERFULLCONTENT`），后续 UI 判定不再需要用户代劳。
