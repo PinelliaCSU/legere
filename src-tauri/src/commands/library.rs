@@ -34,7 +34,7 @@ pub fn document_url_for(id: i64, mtime_ms: i64) -> String {
 #[tauri::command]
 pub async fn library_root_list(state: State<'_, AppState>) -> Result<Vec<LibraryRootDto>, ApiError> {
     let repos = SqlRepos;
-    state.with_db(|db| db.with_read(|conn| repos.list(conn)))
+    state.with_db(|db| db.with_read(|conn| LibraryRootRepo::list(&repos, conn)))
 }
 
 #[tauri::command]
@@ -56,7 +56,7 @@ pub async fn library_root_add(
                 ApiError::new(ApiErrorCode::Db, "数据库错误", false).with_detail(e.to_string())
             })?;
             // 同一路径重复添加：直接返回已有根（幂等），不报 E_DB。
-            let existing = repos.list(&tx)?;
+            let existing = LibraryRootRepo::list(&repos, &tx)?;
             if let Some(found) = existing.iter().find(|r| r.path.eq_ignore_ascii_case(&normalized)) {
                 return Ok(found.clone());
             }
@@ -106,7 +106,7 @@ pub async fn library_scan_start(
     let repos = SqlRepos;
     let targets: Vec<LibraryRootDto> = state.with_db(|db| {
         db.with_read(|conn| {
-            let all = repos.list(conn)?;
+            let all = LibraryRootRepo::list(&repos, conn)?;
             Ok(match root_id {
                 Some(id) => all.into_iter().filter(|r| r.id == id && r.enabled).collect(),
                 None => all.into_iter().filter(|r| r.enabled).collect(),

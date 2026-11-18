@@ -112,7 +112,7 @@ impl LibraryRootRepo for SqlRepos {
         )
         .map_err(|e| db_err("插入 library_root 失败", e))?;
         let id = conn.last_insert_rowid();
-        self.list(conn)?
+        LibraryRootRepo::list(self, conn)?
             .into_iter()
             .find(|r| r.id == id)
             .ok_or_else(|| ApiError::new(ApiErrorCode::Internal, "插入后读不到 library_root", true))
@@ -559,5 +559,150 @@ fn parse_text_state(raw: String) -> TextState {
         "no_text" => TextState::NoText,
         "failed" => TextState::Failed,
         _ => TextState::Pending,
+    }
+}
+
+pub trait BookmarkRepo {
+    fn list(&self, conn: &Connection, document_id: i64) -> Result<Vec<crate::contracts::dto::BookmarkDto>, ApiError>;
+    fn create(&self, conn: &Connection, document_id: i64, page_no: i64, title: &str, note: Option<&str>, color: Option<&str>) -> Result<crate::contracts::dto::BookmarkDto, ApiError>;
+    fn update(&self, conn: &Connection, id: i64, title: Option<&str>, note: Option<&str>, color: Option<&str>) -> Result<crate::contracts::dto::BookmarkDto, ApiError>;
+    fn delete(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
+}
+
+pub trait ProgressRepo {
+    fn get(&self, conn: &Connection, document_id: i64) -> Result<Option<crate::contracts::dto::ProgressDto>, ApiError>;
+    fn upsert(&self, conn: &Connection, p: &crate::contracts::dto::ProgressDto) -> Result<(), ApiError>;
+}
+
+impl BookmarkRepo for SqlRepos {
+    fn list(&self, conn: &Connection, document_id: i64) -> Result<Vec<crate::contracts::dto::BookmarkDto>, ApiError> {
+        use crate::contracts::dto::BookmarkDto;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, document_id, page_no, title, note, color, created_at, updated_at \
+                 FROM bookmarks WHERE document_id = ?1 ORDER BY page_no ASC, created_at ASC",
+            )
+            .map_err(|e| db_err("准备书签列表失败", e))?;
+        let rows = stmt
+            .query_map(params![document_id], |row| {
+                Ok(BookmarkDto {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    page_no: row.get(2)?,
+                    title: row.get(3)?,
+                    note: row.get(4)?,
+                    color: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| db_err("执行书签列表失败", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("读书签失败", e))
+    }
+
+    fn create(&self, conn: &Connection, document_id: i64, page_no: i64, title: &str, note: Option<&str>, color: Option<&str>) -> Result<crate::contracts::dto::BookmarkDto, ApiError> {
+        if page_no < 1 {
+            return Err(ApiError::new(ApiErrorCode::InvalidArg, "参数不合法", false)
+                .with_detail("pageNo 必须 >= 1"));
+        }
+        let now = now_utc();
+        conn.execute(
+            "INSERT INTO bookmarks (document_id, page_no, title, note, color, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![document_id, page_no, title, note, color, now],
+        )
+        .map_err(|e| db_err("插入书签失败", e))?;
+        let id = conn.last_insert_rowid();
+        BookmarkRepo::list(self, conn, document_id)?
+            .into_iter()
+            .find(|b| b.id == id)
+            .ok_or_else(|| ApiError::new(ApiErrorCode::Internal, "插入后读不到书签", true))
+    }
+
+    fn update(&self, conn: &Connection, id: i64, title: Option<&str>, note: Option<&str>, color: Option<&str>) -> Result<crate::contracts::dto::BookmarkDto, ApiError> {
+        // 语义：未提供 = 不改，提供则整体覆盖（note/color 传空串视为清空）。
+        let affected = conn
+            .execute(
+                "UPDATE bookmarks SET title = COALESCE(?1, title), note = COALESCE(?2, note), \
+                        color = COALESCE(?3, color), updated_at = ?4 WHERE id = ?5",
+                params![title, note, color, now_utc(), id],
+            )
+            .map_err(|e| db_err("更新书签失败", e))?;
+        if affected == 0 {
+            return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该书签", false));
+        }
+        let document_id: i64 = conn
+            .query_row("SELECT document_id FROM bookmarks WHERE id = ?1", params![id], |r| r.get(0))
+            .map_err(|e| db_err("读取书签所属文档失败", e))?;
+        BookmarkRepo::list(self, conn, document_id)?
+            .into_iter()
+            .find(|b| b.id == id)
+            .ok_or_else(|| ApiError::new(ApiErrorCode::Internal, "更新后读不到书签", true))
+    }
+
+    fn delete(&self, conn: &Connection, id: i64) -> Result<(), ApiError> {
+        let affected = conn
+            .execute("DELETE FROM bookmarks WHERE id = ?1", params![id])
+            .map_err(|e| db_err("删除书签失败", e))?;
+        if affected == 0 {
+            return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该书签", false));
+        }
+        Ok(())
+    }
+}
+
+impl ProgressRepo for SqlRepos {
+    fn get(&self, conn: &Connection, document_id: i64) -> Result<Option<crate::contracts::dto::ProgressDto>, ApiError> {
+        use crate::contracts::dto::{ProgressDto, ReadMode};
+        let mut stmt = conn
+            .prepare(
+                "SELECT document_id, page_no, scroll_ratio, zoom, mode, updated_at \
+                 FROM reading_progress WHERE document_id = ?1",
+            )
+            .map_err(|e| db_err("准备进度查询失败", e))?;
+        let mut rows = stmt
+            .query_map(params![document_id], |row| {
+                Ok(ProgressDto {
+                    document_id: row.get(0)?,
+                    page_no: row.get(1)?,
+                    scroll_ratio: row.get(2)?,
+                    zoom: row.get(3)?,
+                    mode: match row.get::<_, String>(4)?.as_str() {
+                        "single" => ReadMode::Single,
+                        _ => ReadMode::Continuous,
+                    },
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| db_err("执行进度查询失败", e))?;
+        match rows.next() {
+            Some(Ok(p)) => Ok(Some(p)),
+            Some(Err(e)) => Err(db_err("读取进度失败", e)),
+            None => Ok(None),
+        }
+    }
+
+    fn upsert(&self, conn: &Connection, p: &crate::contracts::dto::ProgressDto) -> Result<(), ApiError> {
+        if p.page_no < 1 {
+            return Err(ApiError::new(ApiErrorCode::InvalidArg, "参数不合法", false)
+                .with_detail("pageNo 必须 >= 1"));
+        }
+        let ratio = p.scroll_ratio.clamp(0.0, 1.0);
+        conn.execute(
+            "INSERT INTO reading_progress (document_id, page_no, scroll_ratio, zoom, mode, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(document_id) DO UPDATE SET page_no = excluded.page_no, \
+                 scroll_ratio = excluded.scroll_ratio, zoom = excluded.zoom, \
+                 mode = excluded.mode, updated_at = excluded.updated_at",
+            params![p.document_id, p.page_no, ratio, p.zoom, match p.mode { crate::contracts::dto::ReadMode::Single => "single", _ => "continuous" }, p.updated_at],
+        )
+        .map_err(|e| db_err("写入进度失败", e))?;
+        conn.execute(
+            "UPDATE documents SET last_opened_at = ?1 WHERE id = ?2",
+            params![p.updated_at, p.document_id],
+        )
+        .map_err(|e| db_err("更新最近打开时间失败", e))?;
+        Ok(())
     }
 }

@@ -155,7 +155,7 @@ pub fn run() {
                 let roots = state
                     .with_db(|db| {
                         use db::repo::LibraryRootRepo;
-                        db.with_read(|conn| repos.list(conn))
+                        db.with_read(|conn| db::repo::LibraryRootRepo::list(&repos, conn))
                     })
                     .unwrap_or_default();
                 for root in roots.into_iter().filter(|r| r.enabled) {
@@ -254,7 +254,15 @@ pub fn run() {
             commands::index::index_pause,
             commands::index::index_rebuild_all,
             commands::index::search_global,
-            commands::index::search_global_count
+            commands::index::search_global_count,
+            commands::misc::bookmark_list,
+            commands::misc::bookmark_create,
+            commands::misc::bookmark_update,
+            commands::misc::bookmark_delete,
+            commands::misc::progress_get,
+            commands::misc::progress_save,
+            commands::misc::settings_get_all,
+            commands::misc::settings_set
         ])
         .run(tauri::generate_context!())
         .expect("Legere 启动失败");

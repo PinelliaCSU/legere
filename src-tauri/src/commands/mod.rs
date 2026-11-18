@@ -1,3 +1,4 @@
+pub mod misc;
 pub mod index;
 pub mod library;
 
