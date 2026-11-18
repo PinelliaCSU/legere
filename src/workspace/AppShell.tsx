@@ -456,7 +456,6 @@ export function AppShell(): ReactElement {
                       key={option.value}
                       type="button"
                       className={pageTone === option.value ? "is-active" : ""}
-                      disabled={theme !== "dark"}
                       onClick={() => setPageTone(option.value)}
                     >
                       {option.label}
@@ -466,7 +465,7 @@ export function AppShell(): ReactElement {
                 <span className="lg-muted">
                   {theme === "dark"
                     ? (PAGE_TONE_OPTIONS.find((o) => o.value === pageTone)?.hint ?? "")
-                    : "仅深色主题生效：PDF 页面本身是纸白的，夜里刺眼"}
+                    : "当前主题不生效；切到 dark 后按上面的选法应用（PDF 页面本身是纸白的，夜里刺眼）"}
                 </span>
               </div>
             </section>
