@@ -19,11 +19,13 @@ interface ProbeResult {
 
 // V-06 探针：确认 Windows 上 pdf:// 的真实 URL 形态与 Range 响应状态。
 // 两种形态都试，因为 Windows/Android 上自定义 scheme 会被映射到 http://<scheme>.localhost。
+// 结论（2026-11-18 实测）：Windows 上必须用 http://pdf.localhost 形态；
+// pdf:// 直连会 TypeError: Failed to fetch。两条都保留，作为契约 R21 的回归证据。
 const PROBE_TARGETS: { label: string; url: string; range?: string }[] = [
-  { label: "pdf:// 无 Range", url: "pdf://doc/1" },
-  { label: "pdf:// Range 0-9", url: "pdf://doc/1", range: "bytes=0-9" },
-  { label: "localhost 形态 无 Range", url: "http://pdf.localhost/doc/1" },
-  { label: "localhost 形态 Range 0-9", url: "http://pdf.localhost/doc/1", range: "bytes=0-9" },
+  { label: "平台映射形态 无 Range", url: "http://pdf.localhost/doc/1" },
+  { label: "平台映射形态 Range 0-9", url: "http://pdf.localhost/doc/1", range: "bytes=0-9" },
+  { label: "pdf:// 直连 无 Range（预期失败）", url: "pdf://doc/1" },
+  { label: "pdf:// 直连 Range 0-9（预期失败）", url: "pdf://doc/1", range: "bytes=0-9" },
 ];
 
 async function runProbe(target: (typeof PROBE_TARGETS)[number]): Promise<ProbeResult> {

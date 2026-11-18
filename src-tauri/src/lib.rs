@@ -91,7 +91,16 @@ pub fn run() {
             )
             .title(WINDOW_TITLE)
             .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-            .min_inner_size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT);
+            .min_inner_size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+            // app://ready 若只在 setup 里发，会早于页面订阅（实测前端显示"未收到"）。
+            // 页面加载完成后补发一次，让事件成为可靠的"已就绪"信号。
+            .on_page_load(|window, _payload| {
+                let version = commands::VERSION.to_string();
+                let _ = window.app_handle().emit(
+                    contracts::evt::E_APP_READY,
+                    contracts::evt::AppReadyPayload { version },
+                );
+            });
 
             if let Some(dir) = std::env::var_os("LEGERE_WEBVIEW_DATA_DIR") {
                 std::fs::create_dir_all(&dir).ok();
@@ -151,12 +160,19 @@ pub fn run() {
             // V-06 取证点：真实客户端请求时记录 URI 形态与 Range 头。
             tracing::info!(%uri, range = ?range_header, method = %request.method(), "pdf:// 请求进入");
 
-            let response = match protocol::parse_document_id(&uri) {
-                Some(_doc_id) => {
-                    let sample: &[u8] = include_bytes!("../assets/sample.pdf");
-                    protocol::respond(sample, range_header)
+            // 预检：Range 不在 CORS 安全列表内，必须先应答 OPTIONS。
+            let response = if request.method() == tauri::http::Method::OPTIONS {
+                protocol::preflight_response()
+            } else {
+                match protocol::parse_document_id(&uri) {
+                    Some(_doc_id) => {
+                        let sample: &[u8] = include_bytes!("../assets/sample.pdf");
+                        protocol::respond(sample, range_header)
+                    }
+                    None => {
+                        protocol::ProtocolResponse { status: 400, content_range: None, body: Vec::new() }
+                    }
                 }
-                None => protocol::ProtocolResponse { status: 400, content_range: None, body: Vec::new() },
             };
 
             tracing::info!(
@@ -170,7 +186,12 @@ pub fn run() {
                 .status(response.status)
                 .header("Content-Type", "application/pdf")
                 .header("Accept-Ranges", "bytes")
-                .header("Content-Length", response.body.len().to_string());
+                .header("Content-Length", response.body.len().to_string())
+                // CORS：缺任一条都会让前端 fetch 直接失败（实测 Type: Failed to fetch）
+                .header("Access-Control-Allow-Origin", protocol::CORS_ALLOW_ORIGIN)
+                .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                .header("Access-Control-Allow-Headers", protocol::cors_allow_headers())
+                .header("Access-Control-Expose-Headers", protocol::cors_expose_headers());
             if let Some(content_range) = response.content_range {
                 builder = builder.header("Content-Range", content_range);
             }
