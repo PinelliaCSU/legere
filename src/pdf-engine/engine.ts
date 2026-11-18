@@ -227,7 +227,14 @@ class DocumentHandleImpl implements DocumentHandle {
 export const pdfEngine: PdfEngine = {
   async openDocument({ url, docId }) {
     try {
-      const loadingTask = getDocument({ url });
+      const loadingTask = getDocument({
+        url,
+        // 中文/日文/韩文 PDF 的 CID 字体必须靠 cMap 才能解码，否则整页没有文字；
+        // 非内嵌标准字体（Helvetica 等）需要 standardFontData，否则字形缺失。
+        cMapUrl: "pdfjs/cmaps/",
+        cMapPacked: true,
+        standardFontDataUrl: "pdfjs/standard_fonts/",
+      });
       const doc = await loadingTask.promise;
       return new DocumentHandleImpl(doc, loadingTask, docId);
     } catch (err) {

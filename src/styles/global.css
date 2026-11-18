@@ -132,6 +132,15 @@ body {
 }
 .lg-float-btn:hover { opacity: 1; }
 .lg-float-bookmark { right: 24px; top: calc(50% + 56px); font-size: 16px; }
+.lg-zoom-bar {
+  position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
+  display: flex; gap: 6px; align-items: center; z-index: 30;
+  padding: 4px 8px; border-radius: 999px;
+  background: color-mix(in oklab, var(--lg-bg-elevated) 92%, transparent);
+  border: 1px solid var(--lg-border-subtle); font-size: 12px;
+}
+.lg-zoom-bar button { border: none; background: transparent; color: var(--lg-fg-secondary); cursor: pointer; font-size: 13px; padding: 2px 6px; }
+.lg-outline { right: auto; left: 24px; top: 96px; bottom: 96px; width: 280px; border-left: none; border-right: 1px solid var(--lg-border-subtle); }
 .lg-drawer {
   position: fixed; right: 0; top: 56px; bottom: 0; width: 300px; z-index: 60;
   background: var(--lg-bg-elevated); border-left: 1px solid var(--lg-border-subtle);

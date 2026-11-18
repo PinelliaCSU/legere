@@ -53,6 +53,8 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   const [activeHit, setActiveHit] = useState(0);
   const [searching, setSearching] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [outline, setOutline] = useState<{ title: string; pageNo: number | null }[]>([]);
+  const [outlineOpen, setOutlineOpen] = useState(false);
 
   // 打开文档：首屏优先（只等第 1 页几何），其余分批补齐
   useEffect(() => {
@@ -87,6 +89,19 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
           if (p % GEO_BATCH === 0 || p === handle.pageCount) {
             setGeos([...acc]);
           }
+        }
+        // PDF 自带书签（outline）：用户明确要求能获取
+        const nodes = await handle.getOutline();
+        if (alive) {
+          const flat: { title: string; pageNo: number | null }[] = [];
+          const walk = (list: typeof nodes) => {
+            for (const node of list) {
+              flat.push({ title: node.title, pageNo: node.pageNo });
+              if (node.children.length > 0) walk(node.children);
+            }
+          };
+          walk(nodes);
+          setOutline(flat);
         }
         await call(CMD.DOCUMENT_TOUCH_OPENED, { id: documentId });
       } catch (err) {
@@ -221,6 +236,14 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     return () => window.removeEventListener("keydown", onKey);
   }, [currentPage, goToPage, onExit, searchOpen]);
 
+  // Ctrl + 滚轮缩放（用户反馈「阅读无法放大」：原来只支持 Ctrl +/-，滚轮无效）
+  const onWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? -0.1 : 0.1;
+    setScale((s) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number((s + factor).toFixed(2)))));
+  }, []);
+
   const getSelectionText = useCallback(() => window.getSelection()?.toString() ?? "", []);
 
   useEffect(() => {
@@ -237,7 +260,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   const activeRanges = hits[activeHit]?.ranges ?? [];
 
   return (
-    <div className="lg-reader" ref={scrollRef} tabIndex={0}>
+    <div className="lg-reader" ref={scrollRef} tabIndex={0} onWheel={onWheel}>
       {loading ? <p className="lg-reader-status">正在打开…</p> : null}
       {error !== null ? <p className="lg-reader-status">打开失败：{error}</p> : null}
 
@@ -296,6 +319,38 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
           );
         })}
       </div>
+      <div className="lg-zoom-bar">
+        <button type="button" title="缩小" onClick={() => setScale((s) => Math.max(MIN_SCALE, Number((s - 0.1).toFixed(2))))}>−</button>
+        <span>{Math.round(scale * 100)}%</span>
+        <button type="button" title="放大" onClick={() => setScale((s) => Math.min(MAX_SCALE, Number((s + 0.1).toFixed(2))))}>+</button>
+        <button type="button" title="适应宽度" onClick={() => setScale(1)}>1:1</button>
+        {outline.length > 0 ? (
+          <button type="button" title="目录" onClick={() => setOutlineOpen((o) => !o)}>目录</button>
+        ) : null}
+      </div>
+      {outlineOpen && outline.length > 0 ? (
+        <aside className="lg-drawer lg-outline" aria-label="目录">
+          <header className="lg-drawer-head">
+            <strong>目录</strong>
+            <button type="button" className="lg-btn" onClick={() => setOutlineOpen(false)}>关闭</button>
+          </header>
+          <ul className="lg-drawer-list">
+            {outline.map((node, i) => (
+              <li key={i}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (node.pageNo !== null) goToPage(node.pageNo);
+                  }}
+                >
+                  {node.title}
+                  {node.pageNo !== null ? " · p" + node.pageNo : ""}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </aside>
+      ) : null}
       <div className="lg-page-capsule">
         {currentPage} / {doc?.pageCount ?? geos.length}
       </div>
