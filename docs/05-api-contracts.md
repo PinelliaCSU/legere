@@ -189,6 +189,10 @@ DTO ↔ 表映射（不暴露给前端，仅内部参考）：
 | 10 | `document_recent` | `{ limit: number }` | `DocumentDto[]` | `E_DB` | M04 |
 | 11 | `document_touch_opened` | `{ id: number }` | `void` | `E_NOT_FOUND` | M04 |
 | 12 | `document_record_delete` | `{ id: number }` | `void` | `E_NOT_FOUND`, `E_DB` | M04 |
+| 29 | `library_root_update` | `{ id: number, displayName: string }` | `LibraryRootDto` | `E_NOT_FOUND`, `E_INVALID_ARG`, `E_DB` | M04 |
+| 30 | `library_root_replace` | `{ id: number, path: string }` | `LibraryRootDto` | `E_NOT_FOUND`, `E_INVALID_ARG`, `E_IO`, `E_DB` | M04 |
+
+> #29 / #30 为后加的两条（R22 / R23），追加在表尾而不改动既有 1–28 的编号。
 | 13 | `index_enqueue` | `{ documentId: number, priority?: number }` | `{ jobId: number }` | `E_NOT_FOUND` | M10 |
 | 14 | `index_cancel` | `{ jobId: number }` | `void` | `E_NOT_FOUND` | M10 |
 | 15 | `index_status` | — | `IndexStatusDto` | `E_DB` | M10 |
@@ -458,6 +462,8 @@ export interface ReaderApi {
 | R19 | `bookmark_list` 未知 documentId 返回空数组；`progress_save` 未知 documentId 返回 `E_NOT_FOUND`（不做成外键 `E_DB`） | M12 §8 / 12 §4 | M12 依此实现，M14 不必为「文档已删」单独兜错 |
 | R21 | pdf:// 契约修订：① 前端必须用平台映射形态（Windows：http://pdf.localhost/doc/{id}）；② 响应必须带完整 CORS 头并应答 OPTIONS 预检；③ document_url 返回当前平台可用形态 | 08 §6 / M01 实测 | M01 协议实现、M04 的 document_url、M05 的 PDF.js 加载 |
 | R20 | `DocumentDto` 新增 `progressPage`（LEFT JOIN `reading_progress.page_no`）；主页转盘的 `HomeBook.progress` 收敛为 `{ pageNo }`，取消「60 次 `progress_get`」的数据源方案 | 13 §4 / M14 §9 | M04 的 `document_list/recent` 查询各加一列；M14 直接消费 |
+| R22 | 新增 `library_root_update { id, displayName }` → `LibraryRootDto`：**只改显示名**（trim 后不得为空，最长 120 字）。路径变更不走这里——换文件夹等于换内容，必须走 R23，否则旧路径下的文档记录会留在库里，正是「改了文献库但旧文献还在」的成因。成功后发 `library://changed { kinds:[updated], rootId }` | 03/05 只有 add/remove，没有任何「改」的路径 | M04 命令 + `LibraryRootRepo::rename`；M14 文献库列表行操作 |
+| R23 | 新增 `library_root_replace { id, path }` → `LibraryRootDto`：把库根指向另一个文件夹，并在**同一事务内硬删除**该库根下全部文档记录（逐条走 `delete_record`，先清 contentless 的 `page_fts` 再删行，级联清 `page_text/bookmarks/reading_progress/indexing_jobs`），随后 `UPDATE library_roots SET path, last_scanned_at = NULL`，发 `library://changed { kinds:[removed], rootId }`，由前端再发起 `library_scan_start`。**为什么硬删除而不是软删除**：`documents` 上有 `UNIQUE (library_root_id, rel_path_key)`，软删除的行仍占着该键，换文件夹后同名文件会插入失败。路径与其它库根冲突时前置判为 `E_INVALID_ARG`，不把 `E_DB` 抛给前端。磁盘上的旧文件一个都不动（沿用 R16 的约定） | 没有任何「换库」的路径；用户只能移除再用添加，且旧记录会占着唯一键 | M04 命令 + `LibraryRootRepo::replace_path` / `DocumentRepo::purge_documents_of_root`；M03 无 schema 变更；M14 文献库列表行操作 |
 | R18 | 引擎类型与调度类型分文件归属：`src/pdf-engine/types.ts`（M05）与 `src/render/types.ts`（M06），禁止双写同义类型 | 05 §7 原注释把两类都指向 pdf-engine | M05/M06 各自只写自己那份 |
 
 后续如需新增表格类字段，同样在本表登记 R7、R8…，不要在代码里悄悄改契约。

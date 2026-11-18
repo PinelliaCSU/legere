@@ -1,10 +1,28 @@
-/* 主题令牌由 M13 提供（docs/15-theme-tokens.md）。组件只允许用 var(--lg-*)。 */
+/* 主题令牌由 M13 提供（docs/15-theme-tokens.md）。组件只允许用 var(--lg-*)。
+   下面的 :root 常量是 docs/15 里「不随主题变化的纸面/遮罩/阴影」部分：
+   它们仍然以 --lg-* 命名，不允许在组件里出现裸色值。 */
+:root {
+  --lg-page-paper: #ffffff;
+  --lg-page-shadow: 0 1px 2px rgba(16, 24, 32, 0.06), 0 6px 16px rgba(16, 24, 32, 0.05);
+  --lg-spine-fg: rgba(255, 255, 255, 0.92);
+  --lg-scrim: rgba(0, 0, 0, 0.28);
+  /* docs/15 §3：动效时长与统一曲线（D 组的 220ms 进入过渡用 --lg-dur-slow）。 */
+  --lg-dur-fast: 120ms;
+  --lg-dur-base: 180ms;
+  --lg-dur-slow: 240ms;
+  --lg-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+[data-theme="dark"] {
+  /* docs/15 §3：dark 主题页面阴影改用单层，避免深底上发灰。 */
+  --lg-page-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 body {
   font-family: var(--lg-font-ui, system-ui, sans-serif);
-  background: var(--lg-bg-app, #F5F7F9);
-  color: var(--lg-fg-primary, #1B2430);
+  background: var(--lg-bg-app, #f5f7f9);
+  color: var(--lg-fg-primary, #1b2430);
 }
 
 /* ── 外壳 ── */
@@ -45,107 +63,267 @@ body {
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
 .lg-btn-primary { background: var(--lg-accent); color: var(--lg-accent-fg); border-color: var(--lg-accent); }
+.lg-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* ── 主页转盘（docs/13） ── */
 .lg-home { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; }
-/* 环线与书脊共用 transform 定位（left/top 与 transform 混用会导致偏移，实测过）。 */
+/* 离开主页后仍然挂载（13 §6 保留环位置），只做视觉隐藏：
+   不用 display:none —— 那会让 clientWidth 归零、返回时环先塌到中心再弹回。 */
+.lg-home.is-inactive { visibility: hidden; pointer-events: none; }
+/* 环线与书脊共用同一套 center/radius 计算（ring.ts），都用 transform 定位。 */
 .lg-home-ring {
   position: absolute; left: 0; top: 0; border-radius: 50%;
-  border: 2px solid var(--lg-accent); opacity: 0.35; pointer-events: none;
+  border: 2px solid var(--lg-accent); opacity: 0.3; pointer-events: none;
   will-change: transform;
 }
 .lg-spine {
   position: absolute; left: 0; top: 0; padding: 0; border: none; cursor: pointer;
   border-radius: 2px; display: flex; align-items: center; justify-content: center;
-  color: rgba(255, 255, 255, 0.92); overflow: hidden;
+  padding-block: 6px; color: var(--lg-spine-fg); overflow: hidden;
+  background: var(--lg-spine-color, transparent);
   transform-origin: center center;
+  transition: transform var(--lg-dur-base) var(--lg-ease), opacity var(--lg-dur-base) var(--lg-ease);
+  will-change: transform;
 }
-.lg-spine.is-focused { outline: 2px solid var(--lg-accent-fg); box-shadow: 0 0 0 3px var(--lg-accent); }
-.lg-spine-title { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.08em; }
+/* docs/15 §8：dark 主题下发闷，书脊色统一提亮 12%。 */
+[data-theme="dark"] .lg-spine {
+  background: color-mix(in oklab, var(--lg-spine-color, transparent) 88%, white);
+}
+.lg-spine.is-focused { outline: 2px solid var(--lg-accent); outline-offset: 3px; }
+/* D04：竖排书名，长书名按书脊长度截断加省略号。
+   不加 nowrap 的话 writing-mode: vertical-rl 会折成多列竖排，然后在书脊里被裁掉半个字。 */
+.lg-spine-title {
+  writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.08em;
+  display: block; max-height: 100%; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 下半环的 rot 已接近 180°，竖排书名会整体倒置；只翻文字、不动几何。 */
+.lg-spine-title.is-flipped { transform: rotate(180deg); }
 .lg-home-focused {
   position: absolute; transform: translateX(-50%); text-align: center;
   display: flex; flex-direction: column; gap: 4px; pointer-events: none;
+  max-width: min(560px, 62%); 
 }
-.lg-home-focused strong { font-size: 16px; }
+.lg-home-focused strong {
+  font-size: 16px; font-weight: 600; line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
 .lg-home-focused span { font-size: 12px; color: var(--lg-fg-secondary); }
-.lg-home-hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); font-size: 12px; color: var(--lg-fg-muted); pointer-events: none; }
-.lg-home-empty { display: flex; align-items: center; justify-content: center; }
+.lg-home-empty { display: flex; align-items: center; justify-content: center; cursor: default; }
 .lg-home-empty-card { text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.lg-home-empty-card p { margin: 0; color: var(--lg-fg-secondary); }
 
-/* ── 文献库 ── */
-.lg-library { position: absolute; inset: 0; padding: 20px; overflow: auto; }
+/* ── 文献库（安静克制的列表：极淡斑马 + 悬停，不加卡片阴影） ── */
+.lg-library { position: absolute; inset: 0; padding: 20px 24px; overflow: auto; background: var(--lg-bg-app); }
 .lg-library-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
-.lg-doc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.lg-doc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.lg-doc-list li:nth-child(even) button { background: color-mix(in oklab, var(--lg-bg-surface) 55%, transparent); }
 .lg-doc-list button {
-  width: 100%; display: flex; gap: 12px; align-items: baseline; text-align: left;
-  padding: 8px 10px; border: none; background: transparent; color: inherit; cursor: pointer; border-radius: 6px;
+  width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 84px 92px; gap: 16px;
+  align-items: baseline; text-align: left;
+  padding: 9px 12px; border: none; background: transparent; color: inherit;
+  cursor: pointer; border-radius: 6px; font-size: 14px;
 }
 .lg-doc-list button:hover { background: var(--lg-bg-surface); }
-.lg-doc-title { font-size: 14px; }
+.lg-doc-title { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-doc-meta { font-size: 12px; color: var(--lg-fg-muted); text-align: right; }
+
+/* ── 文献库（库根）管理：安静的两行式列表，操作按钮指到行上才显色 ── */
+.lg-roots { margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--lg-border-subtle); }
+.lg-roots-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.lg-roots-head h2 {
+  margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--lg-fg-muted);
+}
+.lg-roots-empty { margin: 4px 0 0 12px; }
+.lg-root-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.lg-root-list li {
+  display: grid; grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) auto;
+  gap: 14px; align-items: center; padding: 6px 12px; border-radius: 6px;
+}
+.lg-root-list li:hover { background: var(--lg-bg-surface); }
+.lg-root-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-root-path { font-size: 12px; color: var(--lg-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-root-actions { display: flex; gap: 2px; opacity: 0.3; transition: opacity var(--lg-dur-fast) var(--lg-ease); }
+.lg-root-list li:hover .lg-root-actions,
+.lg-root-list li:focus-within .lg-root-actions { opacity: 1; }
+.lg-doc-action {
+  border: 1px solid transparent; background: transparent; color: var(--lg-fg-secondary);
+  cursor: pointer; font-size: 12px; padding: 3px 8px; border-radius: 6px;
+}
+.lg-doc-action:hover { border-color: var(--lg-border-strong); color: var(--lg-fg-primary); background: var(--lg-bg-elevated); }
+
+/* 应用内浮层里的行内表单（docs/16 §5：不用系统原生弹窗） */
+.lg-dialog { display: flex; flex-direction: column; gap: 12px; margin-top: 18vh; }
+.lg-dialog-title { margin: 0; font-size: 15px; font-weight: 600; }
+.lg-dialog-sub { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-dialog-body { margin: 0; font-size: 13px; color: var(--lg-fg-secondary); line-height: 1.6; }
+.lg-dialog-error { margin: 0; font-size: 12px; color: var(--lg-fg-primary); }
+.lg-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+.lg-field { display: flex; flex-direction: column; gap: 4px; }
+.lg-field-label { font-size: 12px; color: var(--lg-fg-muted); }
+.lg-field-input {
+  padding: 7px 10px; font-size: 14px; border-radius: 6px;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
+}
 
 /* ── 阅读器（D15/D16：无工具栏 + 底部胶囊） ── */
 .lg-reader { position: absolute; inset: 0; overflow: auto; background: var(--lg-page-bg); padding: 32px 0; }
+/* 中键拖动平移时的抓手光标。 */
+.lg-reader.is-panning { cursor: grabbing; }
+.lg-reader.is-panning * { cursor: grabbing; }
 .lg-reader-status { text-align: center; color: var(--lg-fg-muted); }
-/* 居中必须走 flex + width:100%（fit-content 在滚动容器里会按内容算宽，导致页面向右溢出错位）。 */
-.lg-pages { width: 100%; display: flex; flex-direction: column; align-items: center; padding-bottom: 48px; }
-/* 页槽尺寸由 PageGeometry × scale 内联给出；这里只负责外观。
-   原实现槽高为 0，导致 canvas 不可见（「只有测试页」的根因）。 */
+.lg-reader-failed {
+  display: flex; flex-direction: column; gap: 12px; align-items: center;
+  padding: 48px 16px; color: var(--lg-fg-secondary);
+}
+.lg-reader-failed p { margin: 0; }
+/* 居中不能靠 flex + align-items:center：页宽大于容器时，flex 居中会把页面的左半边
+   推到不可滚动的负向溢出区（实测截图中页面整体偏右、左边被切掉）。
+   块级流 + margin-inline:auto 在超宽时自然退化为左对齐，仍然可滚动。 */
+.lg-pages { width: 100%; padding-bottom: 48px; }
 .lg-page {
   position: relative;
-  background: #FFFFFF;
+  background: var(--lg-page-paper);
   border: 1px solid var(--lg-page-border);
-  box-shadow: var(--lg-page-shadow, 0 1px 2px rgba(16,24,32,.06), 0 6px 16px rgba(16,24,32,.05));
+  box-shadow: var(--lg-page-shadow);
   overflow: hidden;
+  margin-inline: auto;
+}
+/* docs/15 §4：暖色纸光罩只叠在页容器上，不碰 canvas 像素；opacity 由主题控制。 */
+.lg-page::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 3;
+  background: var(--lg-overlay-tint, transparent);
+  opacity: var(--lg-paper-veil-opacity, 0);
+  mix-blend-mode: multiply;
 }
 .lg-page-canvas { position: absolute; inset: 0; }
-.lg-page-canvas canvas { display: block; width: 100%; height: 100%; }
+/* 画布永远铺满页槽：引擎会写内联 width/height（按渲染时的 scale 换算），缩放切换的
+   一两帧里内联尺寸还是旧的，会溢出后被 .lg-page 的 overflow:hidden 裁掉。
+   这里以页槽为准，保证任何时刻看到的都是"整页"。 */
+.lg-page-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
 .lg-page-placeholder {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
+  align-items: center; justify-content: center;
   background: var(--lg-bg-surface); color: var(--lg-fg-muted); font-size: 12px;
 }
 .lg-text-layer { color: transparent; }
 .lg-text-layer span::selection { background: color-mix(in oklab, var(--lg-accent) 35%, transparent); }
 .lg-docsearch {
   position: sticky; top: 0; z-index: 40; display: flex; gap: 8px; align-items: center;
-  padding: 8px 12px; background: var(--lg-bg-elevated); border-bottom: 1px solid var(--lg-border-subtle);
+  padding: 8px 16px; background: var(--lg-bg-elevated); border-bottom: 1px solid var(--lg-border-subtle);
 }
 .lg-docsearch input {
   flex: 1; max-width: 420px; padding: 6px 8px; font-size: 13px;
   border: 1px solid var(--lg-border-strong); border-radius: 6px;
   background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
-.lg-docsearch-list { list-style: none; display: flex; gap: 6px; margin: 0; padding: 0; overflow-x: auto; max-width: 50%; }
+.lg-docsearch-list { list-style: none; display: flex; gap: 6px; margin: 0; padding: 0; overflow-x: auto; max-width: 46%; }
 .lg-docsearch-list button { white-space: nowrap; border: 1px solid var(--lg-border-subtle); background: var(--lg-bg-surface); color: var(--lg-fg-secondary); border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
 .lg-docsearch-list button.is-active { border-color: var(--lg-accent); color: var(--lg-fg-primary); }
+/* D16：页码胶囊固定在底部中央，不随页面滚动。 */
+/* 页码胶囊：现在是「点一下打开跳页面板」的按钮（原来是纯展示、吃不到点击）。 */
 .lg-page-capsule {
-  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
-  padding: 4px 12px; border-radius: 999px; font-size: 12px;
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  padding: 4px 14px; border-radius: 999px; font-size: 12px; cursor: pointer;
   background: color-mix(in oklab, var(--lg-bg-elevated) 88%, transparent);
   color: var(--lg-fg-secondary); border: 1px solid var(--lg-border-subtle);
-  pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
+.lg-page-capsule:hover { color: var(--lg-fg-primary); border-color: var(--lg-border-strong); }
 .lg-float-btn {
   position: fixed; top: 50%; transform: translateY(-50%);
   width: 40px; height: 40px; border-radius: 50%; z-index: 30;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-elevated);
-  color: var(--lg-fg-primary); font-size: 20px; cursor: pointer; opacity: 0.6;
+  color: var(--lg-fg-primary); font-size: 20px; cursor: pointer; opacity: 0.55;
+  transition: opacity var(--lg-dur-fast) var(--lg-ease);
 }
 .lg-float-btn:hover { opacity: 1; }
-.lg-float-bookmark { right: 24px; top: calc(50% + 56px); font-size: 16px; }
-.lg-zoom-bar {
-  position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
-  display: flex; gap: 6px; align-items: center; z-index: 30;
-  padding: 4px 8px; border-radius: 999px;
+.lg-float-left { left: 24px; }
+.lg-float-right { right: 24px; }
+/* 无工具栏方案下的返回入口：一个浮动按钮，不占阅读高度。 */
+.lg-float-back { top: 18px; left: 18px; transform: none; font-size: 22px; }
+/* 阅读选项入口（本轮需求 1）：默认收起的一个圆钮，展开后是右下角的浮层面板。
+   收起状态下不生成任何面板 DOM，也不占版面高度。 */
+.lg-reader-menu-btn {
+  position: fixed; right: 18px; bottom: 16px; z-index: 40;
+  width: 36px; height: 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--lg-border-subtle);
   background: color-mix(in oklab, var(--lg-bg-elevated) 92%, transparent);
-  border: 1px solid var(--lg-border-subtle); font-size: 12px;
+  color: var(--lg-fg-secondary); font-size: 17px; line-height: 1; cursor: pointer;
+  opacity: 0.62;
+  transition: opacity var(--lg-dur-fast) var(--lg-ease);
 }
-.lg-zoom-bar button { border: none; background: transparent; color: var(--lg-fg-secondary); cursor: pointer; font-size: 13px; padding: 2px 6px; }
-.lg-outline { right: auto; left: 24px; top: 96px; bottom: 96px; width: 280px; border-left: none; border-right: 1px solid var(--lg-border-subtle); }
+.lg-reader-menu-btn:hover,
+.lg-reader-menu-btn:focus-visible,
+.lg-reader-menu-btn.is-open { opacity: 1; color: var(--lg-fg-primary); }
+.lg-reader-menu {
+  position: fixed; right: 18px; bottom: 60px; z-index: 41;
+  min-width: 216px; padding: 6px; border-radius: 10px;
+  background: var(--lg-bg-elevated); border: 1px solid var(--lg-border-subtle);
+  box-shadow: var(--lg-page-shadow);
+  display: flex; flex-direction: column; gap: 2px; font-size: 13px;
+}
+.lg-reader-menu-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; }
+.lg-reader-menu-label { margin-right: auto; font-size: 12px; color: var(--lg-fg-muted); }
+.lg-reader-menu-value { min-width: 46px; text-align: center; color: var(--lg-fg-secondary); font-variant-numeric: tabular-nums; }
+.lg-reader-menu-step {
+  width: 26px; height: 26px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface);
+  color: var(--lg-fg-primary); font-size: 14px; line-height: 1;
+}
+.lg-reader-menu-step:hover { background: var(--lg-bg-app); }
+.lg-reader-menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 8px; border: none; border-radius: 7px; text-align: left; cursor: pointer;
+  background: transparent; color: var(--lg-fg-secondary); font-size: 13px;
+}
+.lg-reader-menu-item:hover { background: var(--lg-bg-app); color: var(--lg-fg-primary); }
+.lg-reader-menu-item kbd {
+  font: inherit; font-size: 11px; padding: 0 5px; border-radius: 4px;
+  border: 1px solid var(--lg-border-strong); color: var(--lg-fg-muted);
+}
+.lg-reader-menu-pair { display: flex; gap: 4px; padding: 2px 4px 4px; }
+.lg-reader-menu-fit {
+  flex: 1; padding: 6px 4px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface);
+  color: var(--lg-fg-secondary); font-size: 12px;
+}
+.lg-reader-menu-fit:hover { background: var(--lg-bg-app); color: var(--lg-fg-primary); }
+.lg-reader-menu-input {
+  flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; font-size: 12px;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
+}
+.lg-reader-menu-input::-webkit-outer-spin-button,
+.lg-reader-menu-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.lg-reader-menu-hint { margin: 2px 8px 4px; font-size: 11px; color: var(--lg-fg-muted); }
+/* 阅读区临时提示（缩放百分比 / 已复制 / 已回到第 N 页）。 */
+.lg-reader-notice {
+  position: fixed; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 45;
+  padding: 3px 10px; border-radius: 999px; font-size: 12px; pointer-events: none;
+  background: color-mix(in oklab, var(--lg-bg-elevated) 92%, transparent);
+  border: 1px solid var(--lg-border-subtle); color: var(--lg-fg-secondary);
+  font-variant-numeric: tabular-nums;
+}
+/* 顶部阅读进度细条：2px、不占高度、不吃点击。 */
+.lg-reader-progress {
+  position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 35;
+  background: color-mix(in oklab, var(--lg-border-subtle) 50%, transparent);
+  pointer-events: none;
+}
+.lg-reader-progress > span {
+  display: block; height: 100%; background: var(--lg-accent); opacity: 0.55;
+  transition: width var(--lg-dur-fast) var(--lg-ease);
+}
+/* 抽屉：阅读器没有顶部导航，所以从视口顶端开始。 */
 .lg-drawer {
-  position: fixed; right: 0; top: 56px; bottom: 0; width: 300px; z-index: 60;
+  position: fixed; right: 0; top: 0; bottom: 0; width: 300px; z-index: 60;
   background: var(--lg-bg-elevated); border-left: 1px solid var(--lg-border-subtle);
   padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: auto;
 }
+.lg-outline { right: auto; left: 0; width: 288px; border-left: none; border-right: 1px solid var(--lg-border-subtle); }
 .lg-drawer-head { display: flex; align-items: center; justify-content: space-between; }
 .lg-drawer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .lg-drawer-list li { display: flex; gap: 6px; align-items: center; }
@@ -153,12 +331,11 @@ body {
   flex: 1; text-align: left; border: none; background: transparent; color: var(--lg-fg-secondary);
   cursor: pointer; padding: 4px 0;
 }
+.lg-drawer-list li > button:first-child:hover { color: var(--lg-fg-primary); }
 .lg-icon-btn { border: none; background: transparent; color: var(--lg-fg-muted); cursor: pointer; font-size: 15px; }
-.lg-float-left { left: 24px; }
-.lg-float-right { right: 24px; }
 
 /* ── 全局搜索浮层（D23：居中 720px，距顶 15vh） ── */
-.lg-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.28); display: flex; justify-content: center; }
+.lg-overlay { position: fixed; inset: 0; background: var(--lg-scrim); display: flex; justify-content: center; z-index: 80; }
 .lg-overlay-panel {
   margin-top: 15vh; width: min(720px, 90vw); max-height: 60vh; overflow: auto;
   background: var(--lg-bg-elevated); border-radius: 8px; padding: 16px;
@@ -173,10 +350,33 @@ body {
 .lg-search-results ul { list-style: none; padding-left: 12px; margin: 4px 0; }
 .lg-search-results button { border: none; background: transparent; color: var(--lg-fg-secondary); text-align: left; cursor: pointer; padding: 2px 0; }
 
-/* ── 设置 ── */
-.lg-settings { position: absolute; inset: 0; padding: 20px; overflow: auto; }
-.lg-row { display: flex; align-items: center; gap: 16px; padding: 8px 0; }
+/* ── 设置（分区分割清晰，控件统一走令牌） ── */
+.lg-settings { position: absolute; inset: 0; padding: 24px 28px; overflow: auto; background: var(--lg-bg-app); }
+.lg-settings-section { padding: 14px 0 20px; border-bottom: 1px solid var(--lg-border-subtle); }
+.lg-settings-section:last-child { border-bottom: none; }
+.lg-settings-section h2 {
+  margin: 0 0 10px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--lg-fg-muted);
+}
+.lg-row { display: flex; align-items: center; gap: 16px; padding: 7px 0; font-size: 14px; }
+.lg-row-label { min-width: 108px; color: var(--lg-fg-secondary); }
 .lg-theme-choices { display: flex; gap: 6px; }
-.lg-theme-choices button { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: inherit; cursor: pointer; }
-.lg-theme-choices button.is-active { border-color: var(--lg-accent); font-weight: 600; }
+.lg-theme-choices button {
+  padding: 4px 12px; border-radius: 6px; border: 1px solid var(--lg-border-strong);
+  background: var(--lg-bg-surface); color: var(--lg-fg-secondary); cursor: pointer; font-size: 13px;
+}
+.lg-theme-choices button.is-active { border-color: var(--lg-accent); color: var(--lg-fg-primary); font-weight: 600; }
+.lg-keymap { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lg-keymap li { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--lg-fg-secondary); }
+.lg-keymap span { margin-left: 10px; }
+.lg-keymap kbd {
+  font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-secondary);
+}
 .lg-boot { padding: 40px; text-align: center; color: var(--lg-fg-muted); }
+
+/* 减少动态效果：不产生惯性或过渡动画（13 §3）。 */
+@media (prefers-reduced-motion: reduce) {
+  .lg-spine, .lg-float-btn, .lg-reader-menu-btn { transition: none; }
+  * { scroll-behavior: auto; }
+}

@@ -5,7 +5,7 @@
 // 注意：M03 交付范围只到「表可写、可读、可级联」。FTS 写入统一由 M09/M10 通过
 // insert_page_with_fts 完成，避免两处各写一套 rowid 绑定逻辑。
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{db_err, now_utc};
 use crate::contracts::dto::{
@@ -17,6 +17,14 @@ pub trait LibraryRootRepo {
     fn list(&self, conn: &Connection) -> Result<Vec<LibraryRootDto>, ApiError>;
     fn add(&self, conn: &Connection, path: &str, display_name: &str) -> Result<LibraryRootDto, ApiError>;
     fn remove(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
+    /// 按 id 读一个库根（更改/替换之后要把最新值回给前端）。
+    fn get(&self, conn: &Connection, id: i64) -> Result<LibraryRootDto, ApiError>;
+    /// 更改文献库：只改显示名（docs/05 §13 R22）。
+    fn rename(&self, conn: &Connection, id: i64, display_name: &str) -> Result<LibraryRootDto, ApiError>;
+    /// 替换文献库：把库根指向另一个文件夹（docs/05 §13 R23）。
+    /// 只改 path 与 last_scanned_at，**不动 documents**——旧文档的清理由
+    /// DocumentRepo::purge_documents_of_root 在同一事务里显式完成。
+    fn replace_path(&self, conn: &Connection, id: i64, path: &str) -> Result<LibraryRootDto, ApiError>;
 }
 
 /// 扫描比对所需的最小事实集（不携带正文，避免大对象进出）。
@@ -58,6 +66,13 @@ pub trait DocumentRepo {
     fn get_detail(&self, conn: &Connection, id: i64) -> Result<crate::contracts::dto::DocumentDetailDto, ApiError>;
     fn abs_path_of(&self, conn: &Connection, id: i64) -> Result<(String, Option<i64>, String, i64), ApiError>;
     fn delete_record(&self, conn: &Connection, id: i64) -> Result<(), ApiError>;
+    /// 删除某库根下的全部文档记录，返回删除条数（替换文献库时用，R23）。
+    ///
+    /// 必须逐条走 delete_record：page_fts 是 contentless 表、没有外键，
+    /// 只靠 documents 的 ON DELETE CASCADE 会留下永远检索不到也删不掉的幽灵 FTS 行。
+    fn purge_documents_of_root(&self, conn: &Connection, root_id: i64) -> Result<usize, ApiError>;
+    /// 某库根下的文档 id 列表（软删除的也算：它们占着 rel_path_key 的唯一约束）。
+    fn ids_of_root(&self, conn: &Connection, root_id: i64) -> Result<Vec<i64>, ApiError>;
 }
 
 pub trait SettingsRepo {
@@ -126,6 +141,55 @@ impl LibraryRootRepo for SqlRepos {
             return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该文献库", false));
         }
         Ok(())
+    }
+
+    fn get(&self, conn: &Connection, id: i64) -> Result<LibraryRootDto, ApiError> {
+        LibraryRootRepo::list(self, conn)?
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| ApiError::new(ApiErrorCode::NotFound, "找不到该文献库", false))
+    }
+
+    fn rename(&self, conn: &Connection, id: i64, display_name: &str) -> Result<LibraryRootDto, ApiError> {
+        let name = display_name.trim();
+        if name.is_empty() {
+            return Err(ApiError::new(ApiErrorCode::InvalidArg, "参数不合法", false)
+                .with_detail("文献库名称不能为空"));
+        }
+        let affected = conn
+            .execute(
+                "UPDATE library_roots SET display_name = ?1 WHERE id = ?2",
+                params![name, id],
+            )
+            .map_err(|e| db_err("更新 library_root 名称失败", e))?;
+        if affected == 0 {
+            return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该文献库", false));
+        }
+        LibraryRootRepo::get(self, conn, id)
+    }
+
+    fn replace_path(&self, conn: &Connection, id: i64, path: &str) -> Result<LibraryRootDto, ApiError> {
+        // 先确认要替换的库根存在，避免后续 UPDATE 只是「影响 0 行」。
+        let _ = LibraryRootRepo::get(self, conn, id)?;
+        // path 上有 UNIQUE 约束：前置检查能给出可读的错误，而不是把 E_DB 抛给前端。
+        let conflict: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM library_roots WHERE path = ?1 AND id <> ?2",
+                params![path, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| db_err("检查库根路径冲突失败", e))?;
+        if conflict.is_some() {
+            return Err(ApiError::new(ApiErrorCode::InvalidArg, "参数不合法", false)
+                .with_detail(format!("该文件夹已经是另一个文献库：{path}")));
+        }
+        conn.execute(
+            "UPDATE library_roots SET path = ?1, last_scanned_at = NULL WHERE id = ?2",
+            params![path, id],
+        )
+        .map_err(|e| db_err("替换 library_root 路径失败", e))?;
+        LibraryRootRepo::get(self, conn, id)
     }
 }
 
@@ -469,6 +533,25 @@ impl DocumentRepo for SqlRepos {
             return Err(ApiError::new(ApiErrorCode::NotFound, "找不到该文献", false));
         }
         Ok(())
+    }
+
+    fn ids_of_root(&self, conn: &Connection, root_id: i64) -> Result<Vec<i64>, ApiError> {
+        let mut stmt = conn
+            .prepare("SELECT id FROM documents WHERE library_root_id = ?1 ORDER BY id")
+            .map_err(|e| db_err("准备库根文档查询失败", e))?;
+        let rows = stmt
+            .query_map(params![root_id], |row| row.get::<_, i64>(0))
+            .map_err(|e| db_err("执行库根文档查询失败", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_err("读取库根文档失败", e))
+    }
+
+    fn purge_documents_of_root(&self, conn: &Connection, root_id: i64) -> Result<usize, ApiError> {
+        let ids = DocumentRepo::ids_of_root(self, conn, root_id)?;
+        for id in &ids {
+            DocumentRepo::delete_record(self, conn, *id)?;
+        }
+        Ok(ids.len())
     }
 }
 

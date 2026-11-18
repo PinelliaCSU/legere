@@ -28,9 +28,15 @@ export class RenderSchedulerImpl implements RenderScheduler {
   private readonly states = new Map<number, PageRenderState>();
   private readonly listeners = new Set<(states: ReadonlyMap<number, PageRenderState>) => void>();
   private readonly running = new Map<number, RenderTaskHandle>();
-  private canvasCache = new BoundedLru<HTMLCanvasElement>(DEFAULT_BUDGET.cacheBytes);
+  /// 位图缓存必须**连同渲染时的 scale 一起存**：旧实现只按 pageNo 取，
+  /// 命中后把当前 scale 盖到状态上，pump() 的「scale 一致就跳过」判断就永远为真，
+  /// 页面槽变宽而位图不重渲染 —— 表现出来就是「放大只是页面变宽，字没变大」。
+  private canvasCache = new BoundedLru<{ canvas: HTMLCanvasElement; scale: number }>(DEFAULT_BUDGET.cacheBytes);
   private textCache = new BoundedLru<TextContentHandle>(64 * 1024 * 1024);
   private boxes: PageBox[] = [];
+  /// 用户点了「重试」的页：只有这些页允许在 error 状态下再次入队，
+  /// 否则任何滚动/缩放都会把失败页重新排队（重试风暴）。
+  private readonly retryable = new Set<number>();
 
   setDocument(handle: DocumentHandle | null): void {
     // 契约 R4：换文档即以新文档替换旧文档，先释放旧资源。
@@ -38,6 +44,7 @@ export class RenderSchedulerImpl implements RenderScheduler {
     this.canvasCache.clear();
     this.textCache.clear();
     this.states.clear();
+    this.retryable.clear();
     this.doc = handle;
     if (handle !== null) {
       this.boxes = computePageBoxes(this.viewport?.pageGeometries ?? [], this.viewport?.scale ?? 1);
@@ -57,13 +64,21 @@ export class RenderSchedulerImpl implements RenderScheduler {
   setBudget(b: Partial<RenderBudget>): void {
     this.budget = { ...this.budget, ...b };
     if (b.cacheBytes !== undefined) {
-      this.canvasCache = new BoundedLru<HTMLCanvasElement>(b.cacheBytes);
+      this.canvasCache = new BoundedLru<{ canvas: HTMLCanvasElement; scale: number }>(b.cacheBytes);
     }
     this.pump();
   }
 
   getPageState(pageNo: number): PageRenderState | undefined {
     return this.states.get(pageNo);
+  }
+
+  /// 单页失败后的显式重试入口（阅读器占位区里的「重试」按钮）。
+  retry(pageNo: number): void {
+    if (this.disposed) return;
+    this.retryable.add(pageNo);
+    this.states.delete(pageNo);
+    this.pump();
   }
 
   subscribe(cb: (states: ReadonlyMap<number, PageRenderState>) => void): () => void {
@@ -142,6 +157,7 @@ export class RenderSchedulerImpl implements RenderScheduler {
     for (let p = prefetch.first; p <= prefetch.last; p += 1) {
       const state = this.states.get(p);
       if (state?.state === "ready" && state.scale === viewport.scale) continue;
+      if (state?.state === "error" && !this.retryable.has(p)) continue;
       if (this.running.has(p)) continue;
       candidates.push({ pageNo: p, priority: pagePriority(p, range, range.first) });
     }
@@ -172,8 +188,8 @@ export class RenderSchedulerImpl implements RenderScheduler {
       this.patch(pageNo, { textContent: text });
 
       const cached = this.canvasCache.get(pageNo);
-      if (cached !== undefined) {
-        this.patch(pageNo, { state: "ready", canvas: cached, scale });
+      if (cached !== undefined && cached.scale === scale) {
+        this.patch(pageNo, { state: "ready", canvas: cached.canvas, scale });
         this.emit();
         return;
       }
@@ -187,7 +203,8 @@ export class RenderSchedulerImpl implements RenderScheduler {
       this.running.delete(pageNo);
 
       const bytes = canvasBytes(page.geometry.widthPt, page.geometry.heightPt, scale, DPR);
-      this.canvasCache.set(pageNo, canvas, bytes);
+      this.canvasCache.set(pageNo, { canvas, scale }, bytes);
+      this.retryable.delete(pageNo);
       this.patch(pageNo, { state: "ready", canvas, scale, error: null });
       this.emit();
 

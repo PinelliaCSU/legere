@@ -1,4 +1,4 @@
-// Command 注册表（docs/05-api-contracts.md §3 的 28 条 + doc 说明的 debug-only 那条不在表内）。
+// Command 注册表（docs/05-api-contracts.md §3 的 30 条 + doc 说明的 debug-only 那条不在表内）。
 // 入参一律为单对象；返回与错误码以 05 为准。本表是 "前端能调什么" 的唯一来源。
 
 import type {
@@ -28,6 +28,8 @@ export const CMD = {
   LIBRARY_ROOT_LIST: "library_root_list",
   LIBRARY_ROOT_ADD: "library_root_add",
   LIBRARY_ROOT_REMOVE: "library_root_remove",
+  LIBRARY_ROOT_UPDATE: "library_root_update",
+  LIBRARY_ROOT_REPLACE: "library_root_replace",
   LIBRARY_SCAN_START: "library_scan_start",
 
   DOCUMENT_LIST: "document_list",
@@ -69,6 +71,8 @@ export interface CommandMap {
   library_root_list: { args: Record<string, never>; result: LibraryRootDto[] };
   library_root_add: { args: { path: string }; result: LibraryRootDto };
   library_root_remove: { args: { id: number; purge: boolean }; result: void };
+  library_root_update: { args: { id: number; displayName: string }; result: LibraryRootDto };
+  library_root_replace: { args: { id: number; path: string }; result: LibraryRootDto };
   library_scan_start: { args: { rootId?: number }; result: ScanStartedDto };
 
   document_list: { args: { query: DocumentQuery }; result: PageDto<DocumentDto> };

@@ -1,12 +1,17 @@
-// 主页空间转盘（docs/13，D01–D14）。
+// M14 · 主页空间转盘（docs/13，D01–D14）。
 //
-// 2026-11-18 修订（用户反馈「书多时挤成一团」）：
-// 环上**同时只放 RING_SLOTS 个槽位**，其余书籍通过「滚轮 / 拖拽 / ←→」滑入窗口。
-// 这样书数再多，相邻书脊的角距也固定，不会挤在一起；隐藏的槽位依旧不生成 DOM。
+// 2026-11 修订（用户反馈「书多时挤成一团」「环与书脊没对齐」）：
+// 1. 几何只有一套：layoutRing 同时给出环心、半径、每个书脊的 transform，环线直接复用；
+// 2. 只挂载可见弧内的槽位（RING_SLOTS 上限），隐藏槽位不生成任何 DOM（13 §2 绝对约束 1）；
+// 3. 焦点书恒为窗口首本并落在正前（+90°），滚轮 / 拖拽 / ←→ / Enter 语义一致；
+// 4. 组件常驻挂载（active 控制按键），从阅读器返回时环位置与焦点不重置（13 §6）；
+// 5. 尺寸用 ResizeObserver + 真实 clientWidth/Height，不再依赖 window.resize。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from "react";
 
-import { RING, focusIndex, layoutSpines, ringCenter, type SpineLayout } from "./ring";
+import { RING, RING_SLOTS, layoutRing, ringCenter, type RingSpine } from "./ring";
+
+export { RING_SLOTS };
 
 export interface HomeBook {
   documentId: number;
@@ -30,120 +35,128 @@ export const SPINE_PALETTE = [
   "#9FB08C",
 ] as const;
 
+/// 书脊悬停 tooltip（docs/16 §6「书脊悬停 tooltip（A4 已定）」）：
+/// 作者 + 阅读进度两项；缺作者时只显示进度。
+/// 两者都没有时回退到书名 —— 否则 tooltip 是空的，等于没有提示。
+export function spineTooltip(book: HomeBook): string {
+  const parts: string[] = [];
+  if (book.author !== null && book.author.trim().length > 0) parts.push(book.author.trim());
+  if (book.progressPage !== null && book.pageCount !== null) {
+    parts.push("读到第 " + book.progressPage + " / " + book.pageCount + " 页");
+  } else if (book.pageCount !== null) {
+    parts.push("共 " + book.pageCount + " 页");
+  }
+  return parts.length > 0 ? parts.join(" · ") : book.title;
+}
+
 export function spineColorFor(documentId: number): string {
   const index = Math.abs(documentId) % SPINE_PALETTE.length;
   return SPINE_PALETTE[index] ?? SPINE_PALETTE[0];
 }
 
-/// 环上的槽位数上限：决定同时可见的书脊数量（与书总数无关）。
-export const RING_SLOTS = 16;
-
 interface HomeSpaceProps {
   books: HomeBook[];
   onOpenBook: (documentId: number) => void;
   onAddLibrary: () => void;
+  /// 是否处于主页路由：false 时禁用滚轮 / 拖拽 / 键盘，避免与阅读器抢按键。
+  active?: boolean;
 }
 
-export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): ReactElement {
+const FOCUS_RAD = Math.PI / 2;
+const DRAG_STEP_PX = 40;
+
+export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: HomeSpaceProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 1280, height: 800 });
   const [windowStart, setWindowStart] = useState(0);
-  const [focusedSlot, setFocusedSlot] = useState(0);
-  const dragRef = useRef<{ x: number; moved: boolean } | null>(null);
-
-  useEffect(() => {
-    const measure = () => {
-      const el = hostRef.current;
-      if (el === null) return;
-      setSize({ width: el.clientWidth, height: el.clientHeight });
-    };
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, [books.length]);
 
   const total = books.length;
-  const slots = Math.min(total, RING_SLOTS);
-  const focusRad = Math.PI / 2;
-  const center = useMemo(() => ringCenter(size.width, size.height), [size.width, size.height]);
+  const start = total > 0 ? ((windowStart % total) + total) % total : 0;
 
-  /// 当前窗口内的书（按槽位顺序）；槽位角度固定，所以角距恒定。
-  const windowBooks = useMemo(() => {
-    if (total === 0) return [] as { slot: number; book: HomeBook }[];
-    const out: { slot: number; book: HomeBook }[] = [];
-    for (let slot = 0; slot < slots; slot += 1) {
-      const index = (windowStart + slot) % total;
-      const book = books[index];
-      if (book !== undefined) out.push({ slot, book });
-    }
-    return out;
-  }, [books, slots, total, windowStart]);
-
-  /// 槽位布局：用 slots 作为总数，保证 Δ 恒定。
-  const layouts = useMemo(
-    () => layoutSpines(slots, 0, focusRad, center),
-    [slots, center],
-  );
-
+  // 真实可见区域：clientWidth/Height 而不是 window.innerWidth（后者含侧边栏/滚动条误差）。
   useEffect(() => {
-    if (layouts.length === 0) return;
-    setFocusedSlot(focusIndex(layouts, focusRad));
-  }, [layouts]);
+    const el = hostRef.current;
+    if (el === null) return;
+    const measure = () => {
+      const width = el.clientWidth;
+      const height = el.clientHeight;
+      setSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [total]);
+
+  const center = useMemo(() => ringCenter(size.width, size.height), [size.width, size.height]);
+  const spines = useMemo(() => layoutRing(total, center, FOCUS_RAD), [total, center]);
+  const spineLength = RING.spineHeightRatio * center.radius;
 
   const rotate = useCallback(
     (dir: 1 | -1) => {
       if (total === 0) return;
-      setWindowStart((start) => ((start + dir) % total + total) % total);
+      setWindowStart((value) => value + dir);
     },
     [total],
   );
 
-  // 滚轮：一格一本（D09 的方向语义保留，改为离散滑动更可控）
-  const onWheel = useCallback(
-    (e: React.WheelEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      const dir: 1 | -1 = e.deltaY > 0 ? 1 : -1;
-      rotate(dir);
-    },
-    [rotate],
-  );
-
-  // 拖拽：横向位移超过阈值才切换，且不吞掉点击
-  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    dragRef.current = { x: e.clientX, moved: false };
-  };
-
-  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (drag === null) return;
-    const dx = e.clientX - drag.x;
-    if (Math.abs(dx) < 40) return;
-    drag.moved = true;
-    drag.x = e.clientX;
-    rotate(dx > 0 ? -1 : 1);
-  };
-
-  const onPointerUp = () => {
-    if (dragRef.current !== null) dragRef.current = null;
-  };
-
-  // 键盘
+  // 滚轮 = 旋转转盘（D09）。必须用非被动原生监听：React 的 onWheel 是 passive，
+  // preventDefault 无效，页面会跟着滚。
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (total === 0) return;
-      if (e.key === "ArrowRight") rotate(1);
-      else if (e.key === "ArrowLeft") rotate(-1);
-      else if (e.key === "Enter") {
-        const entry = windowBooks.find((w) => w.slot === focusedSlot);
-        if (entry !== undefined) onOpenBook(entry.book.documentId);
+    const el = hostRef.current;
+    if (el === null || !active || total === 0) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (event.deltaY === 0) return;
+      rotate(event.deltaY > 0 ? 1 : -1);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [active, rotate, total]);
+
+  // 键盘：只在主页路由生效，避免和阅读器的 ←→ / M / Esc 冲突。
+  useEffect(() => {
+    if (!active || total === 0) return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target !== null && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        rotate(1);
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        rotate(-1);
+      } else if (event.key === "Enter") {
+        const book = books[start];
+        if (book !== undefined) onOpenBook(book.documentId);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusedSlot, onOpenBook, rotate, total, windowBooks]);
+  }, [active, books, onOpenBook, rotate, start, total]);
 
-  const spineLength = RING.spineHeightRatio * center.radius;
-  const focusedEntry = windowBooks.find((w) => w.slot === focusedSlot);
+  // 拖拽：横向位移超过阈值才切一格，且不吞掉点击（D09 同轴）。
+  const dragRef = useRef<{ x: number; moved: boolean } | null>(null);
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!active) return;
+    dragRef.current = { x: event.clientX, moved: false };
+  };
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (drag === null || !active) return;
+    const dx = event.clientX - drag.x;
+    if (Math.abs(dx) < DRAG_STEP_PX) return;
+    drag.moved = true;
+    drag.x = event.clientX;
+    rotate(dx > 0 ? -1 : 1);
+  };
+  const onPointerUp = () => {
+    dragRef.current = null;
+  };
 
   if (total === 0) {
     return (
@@ -158,11 +171,19 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
     );
   }
 
+  const focused = books[start];
+  // D11：环心下方只展示焦点书一条（书名 + 作者 + 读到第 x / y 页），不常驻堆叠。
+  const metaParts: string[] = [];
+  if (focused?.author) metaParts.push(focused.author);
+  if (focused?.progressPage !== null && focused?.progressPage !== undefined && focused?.pageCount !== null && focused?.pageCount !== undefined) {
+    metaParts.push("读到第 " + focused.progressPage + " / " + focused.pageCount + " 页");
+  }
+  const meta = metaParts.join(" · ");
+
   return (
     <div
-      className="lg-home"
+      className={"lg-home" + (active ? "" : " is-inactive")}
       ref={hostRef}
-      onWheel={onWheel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -176,48 +197,43 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
           transform: "translate3d(" + (center.cx - center.radius) + "px," + (center.cy - center.radius) + "px,0)",
         }}
       />
-      {layouts.map((layout: SpineLayout) => {
-        const entry = windowBooks.find((w) => w.slot === layout.index);
-        if (entry === undefined) return null;
-        const isFocused = layout.index === focusedSlot;
+      {spines.map((spine: RingSpine) => {
+        const book = books[((start + spine.bookOffset) % total + total) % total];
+        if (book === undefined) return null;
+        const isFocused = spine.bookOffset === 0 && total !== 2;
         return (
           <button
-            key={entry.book.documentId}
+            key={book.documentId}
             type="button"
             data-home-spine=""
-            data-index={layout.index}
+            data-slot={spine.slotOffset}
+            data-document-id={book.documentId}
             className={"lg-spine" + (isFocused ? " is-focused" : "")}
-            title={entry.book.title}
-            onClick={() => onOpenBook(entry.book.documentId)}
-            style={{
-              width: RING.spineWidthPx,
-              height: spineLength,
-              background: entry.book.spineColor,
-              zIndex: layout.zIndex,
-              opacity: layout.opacity,
-              fontSize: layout.fontSize,
-              transform:
-                "translate3d(" + layout.left + "px," + layout.top + "px,0) rotate(" + layout.rotationDeg + "deg) scale(" + layout.scale + ")",
-            }}
+            title={spineTooltip(book)}
+            tabIndex={-1}
+            onClick={() => onOpenBook(book.documentId)}
+            style={
+              {
+                width: RING.spineWidthPx,
+                height: spineLength,
+                // docs/15 §8：dark 主题要把书脊色提亮 12%，所以颜色走 CSS 变量而不是内联 background。
+                "--lg-spine-color": book.spineColor,
+                zIndex: spine.zIndex,
+                opacity: spine.opacity,
+                fontSize: spine.fontSize,
+                transform:
+                  "translate3d(" + spine.left + "px," + spine.top + "px,0) rotate(" + spine.rotationDeg + "deg) scale(" + spine.scale + ")",
+              } as CSSProperties
+            }
           >
-            <span className="lg-spine-title">{entry.book.title}</span>
+            <span className={"lg-spine-title" + (spine.flipText ? " is-flipped" : "")}>{book.title}</span>
           </button>
         );
       })}
-      {focusedEntry !== undefined ? (
+      {focused !== undefined ? (
         <div className="lg-home-focused" style={{ left: center.cx, top: center.cy + spineLength / 2 + 40 }}>
-          <strong>{focusedEntry.book.title}</strong>
-          <span>
-            {focusedEntry.book.author ?? ""}
-            {focusedEntry.book.progressPage !== null && focusedEntry.book.pageCount !== null
-              ? " · 读到第 " + focusedEntry.book.progressPage + " / " + focusedEntry.book.pageCount + " 页"
-              : ""}
-          </span>
-        </div>
-      ) : null}
-      {total > slots ? (
-        <div className="lg-home-hint">
-          共 {total} 本 · 滚轮或拖拽切换 · 当前第 {windowStart + 1} 本起
+          <strong>{focused.title}</strong>
+          {meta === "" ? null : <span>{meta}</span>}
         </div>
       ) : null}
     </div>

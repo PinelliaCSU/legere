@@ -284,3 +284,96 @@ pub async fn document_record_delete(
         })
     })
 }
+
+/// 更改文献库：只改显示名（docs/05 §13 R22）。
+///
+/// 路径变更不走这里 —— 换文件夹等于换内容，必须走 library_root_replace（R23），
+/// 否则旧路径下的文档记录会留在库里，正是「改了文献库但旧文献还在」的成因。
+#[tauri::command]
+pub async fn library_root_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    display_name: String,
+) -> Result<LibraryRootDto, ApiError> {
+    let repos = SqlRepos;
+    let root = state.with_db(|db| db.with_write(|conn| repos.rename(conn, id, &display_name)))?;
+    let _ = app.emit(
+        E_LIBRARY_CHANGED,
+        LibraryChangedEvent {
+            kinds: vec![LibraryChangeKind::Updated],
+            document_ids: Vec::new(),
+            root_id: Some(id),
+        },
+    );
+    Ok(root)
+}
+
+/// 替换文献库：把这个库根指向另一个文件夹，并清空它原有的文档记录（docs/05 §13 R23）。
+///
+/// 为什么**硬删除**旧文档而不是软删除：documents 上有 UNIQUE (library_root_id, rel_path_key)，
+/// 软删除的行仍然占着这个键，换成新文件夹后同名文件会插入失败。硬删除是唯一不留坑的做法，
+/// 也正是「原先的文献不会再出现在软件里」所要求的语义。
+/// 磁盘上的旧文件一个都不动（与 library_root_remove 的 R16 约定一致）。
+#[tauri::command]
+pub async fn library_root_replace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    path: String,
+) -> Result<LibraryRootDto, ApiError> {
+    let dir = ensure_root_dir(&path)?;
+    let normalized = dir.to_string_lossy().replace('\\', "/");
+    let repos = SqlRepos;
+    let (root, removed) = state.with_db(|db| {
+        db.with_write(|conn| {
+            let tx = conn.unchecked_transaction().map_err(|e| {
+                ApiError::new(ApiErrorCode::Db, "数据库错误", false).with_detail(e.to_string())
+            })?;
+            let removed = repos.purge_documents_of_root(&tx, id)?;
+            let root = repos.replace_path(&tx, id, &normalized)?;
+            tx.commit().map_err(|e| {
+                ApiError::new(ApiErrorCode::Db, "数据库错误", false).with_detail(e.to_string())
+            })?;
+            Ok((root, removed))
+        })
+    })?;
+
+    tracing::info!(root_id = id, %normalized, removed, "文献库已替换，旧文档已清理");
+    let _ = app.emit(
+        E_LIBRARY_CHANGED,
+        LibraryChangedEvent {
+            kinds: vec![LibraryChangeKind::Removed],
+            document_ids: Vec::new(),
+            root_id: Some(id),
+        },
+    );
+    Ok(root)
+}
+
+#[cfg(test)]
+mod protocol_url_tests {
+    use super::document_url_for;
+    use crate::protocol::parse_document_id;
+
+    #[test]
+    fn document_url_for_round_trips_through_protocol_parser() {
+        // 命令产出的 URL 必须被 pdf:// handler 的解析器认出同一个 id（R21 + docs/05 §6）。
+        for id in [1i64, 17, 4_294_967_296] {
+            let url = document_url_for(id, 1_700_000_000_000);
+            assert_eq!(parse_document_id(&url), Some(id), "协议解析器认不出命令产出的 URL: {url}");
+            assert!(url.contains(&format!("/doc/{id}")), "URL 必须带 /doc/{{id}}: {url}");
+            assert!(
+                url.starts_with("pdf://doc/")
+                    || url.starts_with("pdf://localhost/")
+                    || url.starts_with("http://pdf.localhost/"),
+                "平台形态不符: {url}"
+            );
+        }
+
+        // handler 必须同时接受三种形态并解析出同一 id。
+        for uri in ["pdf://doc/17", "pdf://localhost/doc/17", "http://pdf.localhost/doc/17"] {
+            assert_eq!(parse_document_id(uri), Some(17), "{uri}");
+        }
+    }
+}

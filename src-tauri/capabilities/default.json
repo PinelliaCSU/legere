@@ -1,11 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "M01 最小能力集：只开 core 默认能力；fs 插件不开（PDF 由 Rust 侧读、经 pdf:// 输出）",
+  "description": "M01 最小能力集：只开 core 默认能力；fs 插件不开（PDF 由 Rust 侧读、经 pdf:// 输出）。阅读器全屏（F11）额外追加两条窗口能力，其余不变。",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen"
   ]
 }

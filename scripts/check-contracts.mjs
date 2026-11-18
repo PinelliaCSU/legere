@@ -115,7 +115,7 @@ const tsCmdSet = new Set(tsCmdValues);
 const rsCmdSet = new Set(rsCmdValues);
 for (const v of tsCmdSet) if (!rsCmdSet.has(v)) problems.push(`Command 仅 TS 有: ${v}`);
 for (const v of rsCmdSet) if (!tsCmdSet.has(v)) problems.push(`Command 仅 Rust 有: ${v}`);
-if (tsCmdSet.size !== 28) problems.push(`Command 数量应为 28，实际 ${tsCmdSet.size}`);
+if (tsCmdSet.size !== 30) problems.push(`Command 数量应为 30，实际 ${tsCmdSet.size}`);
 
 // ── 3) 错误码 ──
 const tsCodes = new Set([...read("src/contracts/errors.ts").matchAll(/"(E_[A-Z_]+)"/g)].map((m) => m[1]));

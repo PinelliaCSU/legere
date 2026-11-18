@@ -8,9 +8,9 @@
 import {
   GlobalWorkerOptions,
   getDocument,
+  type PDFDocumentLoadingTask,
   type PDFDocumentProxy,
   type PDFPageProxy,
-  type PDFDocumentLoadingTask,
 } from "pdfjs-dist";
 // pdfjs 6 必须显式给 worker：否则打包后会去找不存在的 pdf.worker.mjs，
 // getDocument 直接 reject（真实原因会被误判成「PDF 损坏」——本 bug 就是这样暴露的）。
@@ -30,31 +30,39 @@ import type {
   RenderTaskHandle,
   TextContentHandle,
 } from "./types";
+import { PdfEngineError, toPdfEngineError, type PdfErrorStage } from "./error-map";
+import { buildPdfResourceUrls, currentDocumentBaseUri, type PdfResourceUrls } from "./resources";
+import { describeSourcePath, logPdfInfo, reportPdfFailure } from "./diagnostics";
 import { buildTextContent, toTextItem } from "./text-content";
 
-export class PdfEngineError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "PdfEngineError";
-    this.code = code;
+export { PdfEngineError } from "./error-map";
+
+/// 打开序号：同一 docId 又发起打开时，旧的那次结果必须丢弃。
+const openSequenceByDocId = new Map<number, number>();
+let openSequence = 0;
+
+async function destroyQuietly(task: PDFDocumentLoadingTask | null): Promise<void> {
+  if (task === null) return;
+  try {
+    await task.destroy();
+  } catch (err) {
+    logPdfInfo("destroy loadingTask 失败", { detail: err instanceof Error ? err.message : String(err) });
   }
 }
 
-function normalizeError(err: unknown): PdfEngineError {
-  const raw = err instanceof Error ? err.message : String(err);
-  const lower = raw.toLowerCase();
-  if (lower.includes("password")) {
-    return new PdfEngineError("E_PDF_ENCRYPTED", "这个 PDF 有密码保护，暂不支持打开");
+/// 单页几何：失败要抛带 code 的错（局部损坏），不能静默给出 0x0。
+function readGeometry(page: PDFPageProxy): PageGeometry {
+  try {
+    const viewport = page.getViewport({ scale: 1 });
+    const rotation = ((page.rotate % 360) + 360) % 360;
+    return {
+      widthPt: viewport.width,
+      heightPt: viewport.height,
+      rotation: rotation === 90 || rotation === 180 || rotation === 270 ? rotation : 0,
+    };
+  } catch (err) {
+    throw toPdfEngineError(err, { stage: "page" });
   }
-  if (lower.includes("invalid") || lower.includes("corrupt") || lower.includes("format")) {
-    return new PdfEngineError("E_PDF_CORRUPT", "这个 PDF 已损坏，无法打开");
-  }
-  // worker / 网络 / 加载失败不属「PDF 损坏」：误判会掩盖真实原因（曾经踩过）。
-  if (lower.includes("worker") || lower.includes("fetch") || lower.includes("network")) {
-    return new PdfEngineError("E_INTERNAL", "PDF 引擎初始化失败");
-  }
-  return new PdfEngineError("E_INTERNAL", "PDF 引擎失败");
 }
 
 class PageHandleImpl implements PageHandle {
@@ -63,17 +71,17 @@ class PageHandleImpl implements PageHandle {
 
   constructor(private readonly page: PDFPageProxy) {
     this.pageNo = page.pageNumber;
-    const viewport = page.getViewport({ scale: 1 });
-    const rotation = ((page.rotate % 360) + 360) % 360;
-    this.geometry = {
-      widthPt: viewport.width,
-      heightPt: viewport.height,
-      rotation: (rotation === 90 || rotation === 180 || rotation === 270 ? rotation : 0) as 0 | 90 | 180 | 270,
-    };
+    this.geometry = readGeometry(page);
   }
 
   async getTextContent(): Promise<TextContentHandle> {
-    const content = await this.page.getTextContent();
+    let content: Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
+    try {
+      content = await this.page.getTextContent();
+    } catch (err) {
+      // 文本取不到必须报错：静默返回空数组会让上层以为「这页本来就没字」。
+      throw toPdfEngineError(err, { stage: "text" });
+    }
     // pdfjs 的 items 是 TextItem | TextMarkedContent 的联合；标记项没有 str，直接过滤掉。
     const raw = content.items as Array<{
       str?: unknown;
@@ -93,7 +101,11 @@ class PageHandleImpl implements PageHandle {
         hasEOL: item.hasEOL,
       }),
     );
-    return buildTextContent(items, hasEol);
+    const handle = buildTextContent(items, hasEol);
+    if (handle.items.length === 0) {
+      logPdfInfo("页面没有可提取文本（可能是扫描页）", { pageNo: this.pageNo });
+    }
+    return handle;
   }
 
   render(req: RenderRequest): RenderTaskHandle {
@@ -103,8 +115,8 @@ class PageHandleImpl implements PageHandle {
     const viewport = this.page.getViewport({ scale, rotation: this.geometry.rotation });
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
-    canvas.style.width = `${viewport.width / dpr}px`;
-    canvas.style.height = `${viewport.height / dpr}px`;
+    canvas.style.width = viewport.width / dpr + "px";
+    canvas.style.height = viewport.height / dpr + "px";
 
     const context = canvas.getContext("2d");
     if (!context) {
@@ -120,13 +132,10 @@ class PageHandleImpl implements PageHandle {
 
     const promise = task.promise.then(
       () => canvas,
+      // 取消是正常流程（契约 R5/05 §7），不应作为错误冒泡到 UI；
+      // toPdfEngineError 已经把 AbortException / RenderingCancelledException 归为 E_CANCELED。
       (err: unknown) => {
-        // 取消是正常流程（契约 R5/05 §7），不应作为错误冒泡到 UI。
-        const name = (err as { name?: string }).name ?? "";
-        if (name.includes("RenderingCancelled") || name === "AbortException") {
-          throw new PdfEngineError("E_CANCELED", "已取消");
-        }
-        throw normalizeError(err);
+        throw toPdfEngineError(err, { stage: "render" });
       },
     );
 
@@ -134,7 +143,11 @@ class PageHandleImpl implements PageHandle {
   }
 
   dispose(): void {
-    this.page.cleanup();
+    try {
+      this.page.cleanup();
+    } catch (err) {
+      logPdfInfo("page.cleanup 失败", { pageNo: this.pageNo, detail: err instanceof Error ? err.message : String(err) });
+    }
   }
 }
 
@@ -142,7 +155,7 @@ class DocumentHandleImpl implements DocumentHandle {
   readonly docId: number;
   readonly pageCount: number;
   private disposed = false;
-  private readonly pageCache = new Map<number, Promise<PageHandle>>();
+  private readonly pageCache = new Map<number, Promise<PageHandleImpl>>();
 
   constructor(
     private readonly doc: PDFDocumentProxy,
@@ -154,12 +167,25 @@ class DocumentHandleImpl implements DocumentHandle {
   }
 
   async getPage(pageNo: number): Promise<PageHandle> {
-    if (pageNo < 1 || pageNo > this.pageCount) {
-      throw new PdfEngineError("E_INVALID_ARG", `页码越界: ${pageNo}`);
+    if (this.disposed) {
+      throw new PdfEngineError("E_CANCELED", "文档已关闭");
+    }
+    if (!Number.isInteger(pageNo) || pageNo < 1 || pageNo > this.pageCount) {
+      throw new PdfEngineError("E_INVALID_ARG", "页码越界: " + String(pageNo));
     }
     const cached = this.pageCache.get(pageNo);
-    if (cached) return cached;
-    const promise = this.doc.getPage(pageNo).then((page) => new PageHandleImpl(page));
+    if (cached !== undefined) return cached;
+
+    const promise = this.doc.getPage(pageNo).then(
+      (page) => new PageHandleImpl(page),
+      (err: unknown) => {
+        throw toPdfEngineError(err, { stage: "page" });
+      },
+    );
+    // 失败不得永久缓存：否则这一页此后再也重试不出来。
+    void promise.catch(() => {
+      this.pageCache.delete(pageNo);
+    });
     this.pageCache.set(pageNo, promise);
     return promise;
   }
@@ -219,26 +245,79 @@ class DocumentHandleImpl implements DocumentHandle {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    const pending = [...this.pageCache.values()];
     this.pageCache.clear();
-    await this.loadingTask.destroy();
+    // 只 clear 缓存会把 pdfjs 的页面资源（字体、图片位图）留在 worker 里，必须逐页 cleanup。
+    for (const entry of pending) {
+      try {
+        (await entry).dispose();
+      } catch {
+        // 打开就失败的页没有资源要清。
+      }
+    }
+    await destroyQuietly(this.loadingTask);
   }
 }
 
 export const pdfEngine: PdfEngine = {
   async openDocument({ url, docId }) {
+    const startedAt = Date.now();
+    const sequence = ++openSequence;
+    openSequenceByDocId.set(docId, sequence);
+
+    // 资源 URL 一律绝对化：pdfjs 会把字符串原样交给 worker 拼接 fetch。
+    const baseUri = currentDocumentBaseUri();
+    const resources: PdfResourceUrls = buildPdfResourceUrls(baseUri);
+    logPdfInfo("openDocument 开始", { documentId: docId, url, baseUri, resources });
+
+    let loadingTask: PDFDocumentLoadingTask | null = null;
+    let destroyed = false;
+    const destroyOnce = async (): Promise<void> => {
+      if (destroyed) return;
+      destroyed = true;
+      await destroyQuietly(loadingTask);
+    };
+
     try {
-      const loadingTask = getDocument({
+      loadingTask = getDocument({
         url,
         // 中文/日文/韩文 PDF 的 CID 字体必须靠 cMap 才能解码，否则整页没有文字；
-        // 非内嵌标准字体（Helvetica 等）需要 standardFontData，否则字形缺失。
-        cMapUrl: "pdfjs/cmaps/",
+        // 非内嵌标准字体（Helvetica 等）需要 standardFontData；JPX/JBIG2 图片与 ICC
+        // 颜色空间需要 wasm/icc —— 缺任何一个都只会表现为「打开成功但整页空白」。
+        cMapUrl: resources.cMapUrl,
         cMapPacked: true,
-        standardFontDataUrl: "pdfjs/standard_fonts/",
+        standardFontDataUrl: resources.standardFontDataUrl,
+        wasmUrl: resources.wasmUrl,
+        iccUrl: resources.iccUrl,
       });
       const doc = await loadingTask.promise;
+      if (openSequenceByDocId.get(docId) !== sequence) {
+        // 期间同 docId 又发起了一次打开：这份结果已作废，必须销毁而不是返回。
+        await destroyOnce();
+        throw new PdfEngineError("E_CANCELED", "文档已切换，本次打开被取消");
+      }
+      openSequenceByDocId.delete(docId);
+      logPdfInfo("openDocument 成功", { documentId: docId, pageCount: doc.numPages, elapsedMs: Date.now() - startedAt });
       return new DocumentHandleImpl(doc, loadingTask, docId);
     } catch (err) {
-      throw normalizeError(err);
+      const stage: PdfErrorStage = "open";
+      const error = toPdfEngineError(err, { stage });
+      await destroyOnce();
+      if (error.code === "E_CANCELED") {
+        logPdfInfo("openDocument 被取消", { documentId: docId, elapsedMs: Date.now() - startedAt });
+      } else {
+        void reportPdfFailure({
+          stage,
+          documentId: docId,
+          sourcePath: describeSourcePath(url),
+          url,
+          resources,
+          workerSrc: String(GlobalWorkerOptions.workerSrc),
+          error,
+          elapsedMs: Date.now() - startedAt,
+        });
+      }
+      throw error;
     }
   },
 };

@@ -44,6 +44,8 @@ export interface RenderScheduler {
   setViewport(v: ViewportState): void;
   setBudget(b: Partial<RenderBudget>): void;
   getPageState(pageNo: number): PageRenderState | undefined;
+  /// 单页失败后的显式重试（不做重试风暴：失败页默认不再自动入队）。
+  retry(pageNo: number): void;
   subscribe(cb: (states: ReadonlyMap<number, PageRenderState>) => void): () => void;
   dispose(): void;
 }

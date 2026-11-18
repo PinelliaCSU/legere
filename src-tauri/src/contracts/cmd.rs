@@ -1,10 +1,12 @@
-// 与 src/contracts/cmd.ts 的 CMD 一一对应（28 条）。改名 = 架构变更（docs/05 §13）。
+// 与 src/contracts/cmd.ts 的 CMD 一一对应（30 条）。改名 = 架构变更（docs/05 §13）。
 pub const PING: &str = "ping";
 pub const APP_INFO: &str = "app_info";
 
 pub const LIBRARY_ROOT_LIST: &str = "library_root_list";
 pub const LIBRARY_ROOT_ADD: &str = "library_root_add";
 pub const LIBRARY_ROOT_REMOVE: &str = "library_root_remove";
+pub const LIBRARY_ROOT_UPDATE: &str = "library_root_update";
+pub const LIBRARY_ROOT_REPLACE: &str = "library_root_replace";
 pub const LIBRARY_SCAN_START: &str = "library_scan_start";
 
 pub const DOCUMENT_LIST: &str = "document_list";
@@ -37,12 +39,14 @@ pub const SETTINGS_SET: &str = "settings_set";
 pub const DB_INTEGRITY_CHECK: &str = "db_integrity_check";
 
 /// 注册表全集（数量与顺序以 docs/05 §3 为准）。M02 的比对测试依赖它。
-pub const COMMAND_NAMES: [&str; 28] = [
+pub const COMMAND_NAMES: [&str; 30] = [
     PING,
     APP_INFO,
     LIBRARY_ROOT_LIST,
     LIBRARY_ROOT_ADD,
     LIBRARY_ROOT_REMOVE,
+    LIBRARY_ROOT_UPDATE,
+    LIBRARY_ROOT_REPLACE,
     LIBRARY_SCAN_START,
     DOCUMENT_LIST,
     DOCUMENT_GET,

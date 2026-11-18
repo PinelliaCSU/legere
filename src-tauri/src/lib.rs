@@ -187,37 +187,25 @@ pub fn run() {
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol(PDF_SCHEME, |app, request, responder| {
-            // 真实实现：按 document_id 从数据库解析绝对路径，用 Range 读文件。
+            // 真实实现：按 document_id 从数据库解析绝对路径，用 Range 读文件（docs/05 §6 / R15）。
             // 之前这里永远返回内置 sample.pdf —— 这正是「打开任何书都只有一行字」的根因。
+            // 现在每种失败都映射到可区分的状态码：404 记录缺失 / 410 文件不存在 / 403 无权限 /
+            // 423 被占用 / 416 Range 不可满足 / 400 Range 或 id 非法 / 500 其它读取失败。
             let uri = request.uri().to_string();
+            let is_head = request.method() == tauri::http::Method::HEAD;
             let range_header = request.headers().get("range").and_then(|v| v.to_str().ok());
 
-            let respond = |status: u16, content_range: Option<String>, body: Vec<u8>, content_type: &str| {
-                let mut builder = tauri::http::Response::builder()
-                    .status(status)
-                    .header("Content-Type", content_type)
-                    .header("Accept-Ranges", "bytes")
-                    .header("Content-Length", body.len().to_string())
-                    .header("Access-Control-Allow-Origin", protocol::CORS_ALLOW_ORIGIN)
-                    .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-                    .header("Access-Control-Allow-Headers", protocol::cors_allow_headers())
-                    .header("Access-Control-Expose-Headers", protocol::cors_expose_headers());
-                if let Some(value) = content_range {
-                    builder = builder.header("Content-Range", value);
-                }
-                builder.body(body).unwrap_or_else(|_| {
-                    tauri::http::Response::builder().status(500).body(Vec::new()).expect("构造 500 响应不应失败")
-                })
-            };
-
             if request.method() == tauri::http::Method::OPTIONS {
-                responder.respond(respond(204, None, Vec::new(), "text/plain"));
+                // Range 不在 CORS 安全列表内，浏览器必先发预检。
+                responder.respond(protocol::build_preflight_response());
                 return;
             }
 
             let Some(doc_id) = protocol::parse_document_id(&uri) else {
                 tracing::warn!(%uri, "pdf:// 无法解析 document id");
-                responder.respond(respond(400, None, Vec::new(), "text/plain"));
+                let plan = protocol::plan_error(400, "无法从 URL 解析 document id");
+                let body = plan.body_bytes();
+                responder.respond(protocol::build_response(&plan, body));
                 return;
             };
 
@@ -235,8 +223,12 @@ pub fn run() {
             let path = match resolved {
                 Ok((abs_path, _, _, _)) => std::path::PathBuf::from(abs_path),
                 Err(err) => {
-                    tracing::warn!(document_id = doc_id, ?err, "pdf:// 找不到文档路径");
-                    responder.respond(respond(404, None, Vec::new(), "text/plain"));
+                    // 只有「数据库里没有这条记录」才是 404，其余查库失败是 500。
+                    let status = protocol::status_for_lookup_error(&err);
+                    tracing::warn!(document_id = doc_id, status, ?err, "pdf:// 查库失败");
+                    let plan = protocol::plan_error(status, protocol::lookup_error_reason(&err));
+                    let body = plan.body_bytes();
+                    responder.respond(protocol::build_response(&plan, body));
                     return;
                 }
             };
@@ -244,47 +236,43 @@ pub fn run() {
             let size = match std::fs::metadata(&path) {
                 Ok(meta) => meta.len(),
                 Err(err) => {
-                    tracing::warn!(?path, ?err, "pdf:// 读取文件元数据失败");
-                    responder.respond(respond(404, None, Vec::new(), "text/plain"));
+                    // 记录在库但磁盘上：410 不存在 / 403 无权限 / 423 被占用 / 500 其它。
+                    let status = protocol::status_for_io_error(&err);
+                    tracing::warn!(?path, status, ?err, "pdf:// 读取文件元数据失败");
+                    let plan = protocol::plan_error(status, protocol::io_error_reason(&path, &err));
+                    let body = plan.body_bytes();
+                    responder.respond(protocol::build_response(&plan, body));
                     return;
                 }
             };
 
-            let outcome = protocol::parse_range(range_header, size);
-            let (status, content_range, body) = match outcome {
-                protocol::RangeOutcome::Full => match protocol::read_span(&path, 0, size) {
-                    Ok(bytes) => (200u16, None, bytes),
-                    Err(err) => {
-                        tracing::error!(?err, "pdf:// 读取失败");
-                        (500, None, Vec::new())
-                    }
-                },
-                protocol::RangeOutcome::Partial { start, end } => {
-                    let len = end.saturating_sub(start).saturating_add(1);
+            let mut plan = protocol::plan_ok(range_header, size);
+            // HEAD 只回头部：同一份计划，但不读 plan.span 的字节，Content-Length 仍是真实长度。
+            let mut body = if is_head { Vec::new() } else { plan.body_bytes() };
+            if !is_head {
+                if let Some((start, len)) = plan.span {
                     match protocol::read_span(&path, start, len) {
-                        Ok(bytes) => (206, Some(format!("bytes {start}-{end}/{size}")), bytes),
+                        Ok(bytes) => body = bytes,
                         Err(err) => {
-                            tracing::error!(?err, "pdf:// 区间读取失败");
-                            (500, None, Vec::new())
+                            let status = protocol::status_for_io_error(&err);
+                            tracing::error!(?path, status, start, len, ?err, "pdf:// 区间读取失败");
+                            plan = protocol::plan_error(status, protocol::io_error_reason(&path, &err));
+                            body = plan.body_bytes();
                         }
                     }
                 }
-                protocol::RangeOutcome::Unsatisfiable => {
-                    (416, Some(format!("bytes */{size}")), Vec::new())
-                }
-                protocol::RangeOutcome::Invalid => (400, None, Vec::new()),
-            };
+            }
 
             tracing::debug!(
                 document_id = doc_id,
                 %uri,
                 range = ?range_header,
-                status,
+                status = plan.status,
                 body_len = body.len(),
                 "pdf:// 响应"
             );
 
-            responder.respond(respond(status, content_range, body, "application/pdf"));
+            responder.respond(protocol::build_response(&plan, body));
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,
@@ -300,6 +288,8 @@ pub fn run() {
             commands::library::document_url,
             commands::library::document_touch_opened,
             commands::library::document_record_delete,
+            commands::library::library_root_update,
+            commands::library::library_root_replace,
             commands::index::index_enqueue,
             commands::index::index_cancel,
             commands::index::index_status,
