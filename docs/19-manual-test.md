@@ -9,13 +9,15 @@
 cd C:\Users\Lenovo\Desktop\legere
 # 1) 前端产物（改过前端后必须重跑）
 pnpm build
-# 2) 后端 + 应用（release 走内嵌资源，不需要 dev server）
+# 2) 后端 + 应用。注意：本仓库把 CARGO_TARGET_DIR 指向了工作区的 .target
+#    （src-tauri/target 里的旧产物带 Low 完整性标签，已弃用）
 cd src-tauri
+$env:CARGO_TARGET_DIR = "C:\Users\Lenovo\Desktop\legere\.target"
 cargo build --release --features custom-protocol
-# 3) 由于本机构建产物带 Low 完整性标签，需重打一级（只需一次）
-icacls .\target\release\legere.exe /setintegritylevel M
-# 4) 启动
-.\target\release\legere.exe
+# 3) 构建产物带 Low 完整性标签，需重打一级（每次重建后都要做）
+icacls "C:\Users\Lenovo\Desktop\legere\.target\release\legere.exe" /setintegritylevel M
+# 4) 启动（注意是 .target，不是 src-tauri\target）
+C:\Users\Lenovo\Desktop\legere\.target\release\legere.exe
 ```
 
 数据目录：`%APPDATA%\com.legere.reader`（数据库 `legere.db`、日志 `logs\`）。
@@ -65,11 +67,17 @@ icacls .\target\release\legere.exe /setintegritylevel M
 14. `Ctrl+K` 打开居中浮层；输入 ≥2 字回车搜索；点击结果应打开对应文献。
 15. 输入 1 个字应提示「请输入至少 2 个字」（E_INVALID_ARG）。
 
+## 2.5 本轮修复（2026-11-18 晚）
+
+- **阅读器空白已修**：页槽原本没有宽高（高度 0），canvas 绝对定位在零高容器里。现在页槽尺寸由 PageGeometry × scale 内联给出；截图已确认能显示真实页面（白页 + 文字 + 左侧悬浮按钮 + paper 主题）。
+- **环线定位已改**：改用与书脊相同的 transform 路径。**但由于缓存/进程原因本轮截图与上一版字节相同，未能确认生效**，请你实测。
+- 阅读器页面**水平居中仍偏移**（与环线同一现象），改用 flex 居中后截图未变化，怀疑构建产物未生效，需你在干净进程下确认。
+
 ## 3. 已知问题清单（我这边未解决，不需要你复现）
 
 | # | 问题 | 现状 |
 |---|---|---|
-| 1 | 主页环/书脊偏移 | 几何正确、渲染偏移；已定位到 DOM/CSS 层 |
+| 1 | 主页环线偏移（书脊正确） | 已改为与书脊同一条 transform 定位路径，**本次未复验** |
 | 2 | 滚动轮旋转未实现 | HomeSpace 未监听 wheel |
 | 3 | 书签面板 UI 未做 | 后端 8 条命令已就绪（bookmark_*） |
 | 4 | 索引进度条未做 | 事件 `index://progress` 已发 |

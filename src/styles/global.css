@@ -36,9 +36,11 @@ body {
 
 /* ── 主页转盘（docs/13） ── */
 .lg-home { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; }
+/* 环线与书脊共用 transform 定位（left/top 与 transform 混用会导致偏移，实测过）。 */
 .lg-home-ring {
-  position: absolute; border-radius: 50%;
+  position: absolute; left: 0; top: 0; border-radius: 50%;
   border: 2px solid var(--lg-accent); opacity: 0.35; pointer-events: none;
+  will-change: transform;
 }
 .lg-spine {
   position: absolute; left: 0; top: 0; padding: 0; border: none; cursor: pointer;
@@ -71,15 +73,23 @@ body {
 /* ── 阅读器（D15/D16：无工具栏 + 底部胶囊） ── */
 .lg-reader { position: absolute; inset: 0; overflow: auto; background: var(--lg-page-bg); padding: 32px 0; }
 .lg-reader-status { text-align: center; color: var(--lg-fg-muted); }
+/* 居中必须走 flex + width:100%（fit-content 在滚动容器里会按内容算宽，导致页面向右溢出错位）。 */
+.lg-pages { width: 100%; display: flex; flex-direction: column; align-items: center; padding-bottom: 48px; }
+/* 页槽尺寸由 PageGeometry × scale 内联给出；这里只负责外观。
+   原实现槽高为 0，导致 canvas 不可见（「只有测试页」的根因）。 */
 .lg-page {
-  position: relative; margin: 0 auto 12px;
+  position: relative;
   background: #FFFFFF;
   border: 1px solid var(--lg-page-border);
   box-shadow: var(--lg-page-shadow, 0 1px 2px rgba(16,24,32,.06), 0 6px 16px rgba(16,24,32,.05));
+  overflow: hidden;
 }
 .lg-page-canvas { position: absolute; inset: 0; }
 .lg-page-canvas canvas { display: block; width: 100%; height: 100%; }
-.lg-page-placeholder { position: absolute; inset: 0; background: var(--lg-bg-surface); opacity: 0.5; }
+.lg-page-placeholder {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--lg-bg-surface); color: var(--lg-fg-muted); font-size: 12px;
+}
 .lg-text-layer { color: transparent; }
 .lg-text-layer span::selection { background: color-mix(in oklab, var(--lg-accent) 35%, transparent); }
 .lg-page-capsule {

@@ -164,13 +164,14 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
       role="application"
       aria-label="文献空间：左右方向键旋转，回车打开"
     >
+      {/* 环线：与书脊同一条定位路径（transform），避免 left/top 与 transform 混用导致偏移。
+          书脊实测正确、环线实测偏移，说明差异来自定位方式而非几何。 */}
       <div
         className="lg-home-ring"
         style={{
-          left: center.cx - center.radius,
-          top: center.cy - center.radius,
           width: center.radius * 2,
           height: center.radius * 2,
+          transform: "translate3d(" + (center.cx - center.radius) + "px," + (center.cy - center.radius) + "px,0)",
         }}
       />
       {layouts.map((layout: SpineLayout) => {
