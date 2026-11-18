@@ -13,6 +13,26 @@ pub struct ProtocolResponse {
     pub body: Vec<u8>,
 }
 
+/// 跨源访问说明：页面在 tauri://localhost，而协议在 pdf://localhost，属于跨源请求。
+/// 不带这些响应头时浏览器会直接判 fetch 失败（实测：请求到达后端但前端 TypeError: Failed to fetch）。
+/// Range 不是 CORS 安全列表内的请求头，因此还必须应答 OPTIONS 预检。
+pub const CORS_ALLOW_ORIGIN: &str = "*";
+
+/// 允许预检通过的请求头与方法。
+pub fn cors_allow_headers() -> &'static str {
+    "range, if-range, accept, content-type"
+}
+
+/// 需要暴露给脚本读取的响应头（否则 PDF.js 读不到 Content-Range）。
+pub fn cors_expose_headers() -> &'static str {
+    "content-range, accept-ranges, content-length, content-type"
+}
+
+/// OPTIONS 预检响应：204 + CORS 头，无 body。
+pub fn preflight_response() -> ProtocolResponse {
+    ProtocolResponse { status: 204, content_range: None, body: Vec::new() }
+}
+
 /// 从 uri 里解析 document id。
 ///
 /// 必须同时接受两种形态（V-06 未定前不假设单一形态）：
