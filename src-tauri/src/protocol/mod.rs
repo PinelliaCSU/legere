@@ -110,6 +110,28 @@ mod tests {
     }
 
     #[test]
+    fn read_span_reads_real_file_bytes() {
+        // 用仓库自带的 sample.pdf 验证真实文件读取（不依赖数据库）。
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/sample.pdf");
+        let size = std::fs::metadata(&path).expect("sample.pdf 应存在").len();
+        assert!(size > 100, "sample.pdf 大小异常: {size}");
+
+        let head = read_span(&path, 0, 5).expect("读取文件头");
+        assert_eq!(&head[..4], b"%PDF", "文件头必须是 %PDF");
+
+        let tail = read_span(&path, size.saturating_sub(8), 8).expect("读取文件尾");
+        assert!(
+            String::from_utf8_lossy(&tail).contains("%%EOF"),
+            "文件尾应包含 %%EOF，实得 {:?}",
+            String::from_utf8_lossy(&tail)
+        );
+
+        // 越界读取应安全返回空（不 panic）
+        let beyond = read_span(&path, size + 10, 10).expect("越界读取不应报错");
+        assert!(beyond.is_empty());
+    }
+
+    #[test]
     fn respond_full_and_partial() {
         let body = vec![7u8; 100];
         let full = respond(&body, None);
@@ -125,4 +147,22 @@ mod tests {
         assert_eq!(unsat.status, 416);
         assert_eq!(unsat.content_range.as_deref(), Some("bytes */100"));
     }
+}
+/// 从文件读取 [start, start+len) 区间的字节（不整文件读入，避免大 PDF 内存峰值）。
+pub fn read_span(path: &std::path::Path, start: u64, len: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = vec![0u8; len as usize];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let read = file.read(&mut buf[filled..])?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    buf.truncate(filled);
+    Ok(buf)
 }

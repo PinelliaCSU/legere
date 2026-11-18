@@ -1,14 +1,12 @@
-// 主页空间转盘（docs/13，D01–D14 已冻结）。
+// 主页空间转盘（docs/13，D01–D14）。
 //
-// 实现纪律：
-// 1. 隐藏弧内的书**不生成 DOM**（不是 display:none）——13 §2 绝对约束。
-// 2. 拖拽只写 transform，不触发 React 重渲染（13 §5 门槛）。
-// 3. 书脊上只有书名（D04/D12）；焦点书名+作者+进度显示在环心下方（D11）。
-// 4. 空态不画环，只给一句话 + 按钮（D14）。
+// 2026-11-18 修订（用户反馈「书多时挤成一团」）：
+// 环上**同时只放 RING_SLOTS 个槽位**，其余书籍通过「滚轮 / 拖拽 / ←→」滑入窗口。
+// 这样书数再多，相邻书脊的角距也固定，不会挤在一起；隐藏的槽位依旧不生成 DOM。
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
-import { RING, focusIndex, initialBaseRad, layoutSpines, ringCenter, type SpineLayout } from "./ring";
+import { RING, focusIndex, layoutSpines, ringCenter, type SpineLayout } from "./ring";
 
 export interface HomeBook {
   documentId: number;
@@ -20,7 +18,7 @@ export interface HomeBook {
   progressPage: number | null;
 }
 
-/// D13：8 色预设（docs/15-theme-tokens.md §8），按 documentId 哈希取色。
+/// D13：8 色预设（docs/15 §8）。
 export const SPINE_PALETTE = [
   "#9AA47A",
   "#8FA083",
@@ -37,6 +35,9 @@ export function spineColorFor(documentId: number): string {
   return SPINE_PALETTE[index] ?? SPINE_PALETTE[0];
 }
 
+/// 环上的槽位数上限：决定同时可见的书脊数量（与书总数无关）。
+export const RING_SLOTS = 16;
+
 interface HomeSpaceProps {
   books: HomeBook[];
   onOpenBook: (documentId: number) => void;
@@ -46,11 +47,9 @@ interface HomeSpaceProps {
 export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 1280, height: 800 });
-  const rotationRef = useRef(initialBaseRad(books.length));
-  const [baseRad, setBaseRad] = useState(() => initialBaseRad(books.length));
-  const [focusedIndex, setFocusedIndex] = useState(0);
-  const dragRef = useRef<{ active: boolean; lastX: number } | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const [windowStart, setWindowStart] = useState(0);
+  const [focusedSlot, setFocusedSlot] = useState(0);
+  const dragRef = useRef<{ x: number; moved: boolean } | null>(null);
 
   useEffect(() => {
     const measure = () => {
@@ -60,87 +59,93 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
     };
     measure();
     window.addEventListener("resize", measure);
-    // 书数变化会切换「空态 ⇄ 环」两种 DOM 结构，必须重新测量，否则沿用旧尺寸导致圆心偏移。
     return () => window.removeEventListener("resize", measure);
   }, [books.length]);
 
+  const total = books.length;
+  const slots = Math.min(total, RING_SLOTS);
   const focusRad = Math.PI / 2;
   const center = useMemo(() => ringCenter(size.width, size.height), [size.width, size.height]);
-  const layouts = useMemo(() => layoutSpines(books.length, baseRad, focusRad, center), [books.length, baseRad, center]);
+
+  /// 当前窗口内的书（按槽位顺序）；槽位角度固定，所以角距恒定。
+  const windowBooks = useMemo(() => {
+    if (total === 0) return [] as { slot: number; book: HomeBook }[];
+    const out: { slot: number; book: HomeBook }[] = [];
+    for (let slot = 0; slot < slots; slot += 1) {
+      const index = (windowStart + slot) % total;
+      const book = books[index];
+      if (book !== undefined) out.push({ slot, book });
+    }
+    return out;
+  }, [books, slots, total, windowStart]);
+
+  /// 槽位布局：用 slots 作为总数，保证 Δ 恒定。
+  const layouts = useMemo(
+    () => layoutSpines(slots, 0, focusRad, center),
+    [slots, center],
+  );
 
   useEffect(() => {
     if (layouts.length === 0) return;
-    setFocusedIndex(focusIndex(layouts, focusRad));
+    setFocusedSlot(focusIndex(layouts, focusRad));
   }, [layouts]);
 
-  // 拖拽：rAF 内直接写 transform，React 不参与渲染。
-  const applyRotation = useCallback(
-    (deltaPx: number) => {
-      rotationRef.current += deltaPx * 0.004;
-      const host = hostRef.current;
-      if (host === null) return;
-      const slots = Math.max(books.length, RING.minSlots);
-      const spineLength = RING.spineHeightRatio * center.radius;
-      host.querySelectorAll<HTMLElement>("[data-home-spine]").forEach((node) => {
-        const index = Number(node.dataset.index ?? "0");
-        const angle = rotationRef.current + (index * 2 * Math.PI) / slots;
-        const x = center.cx + center.radius * Math.cos(angle) - RING.spineWidthPx / 2;
-        const y = center.cy + center.radius * Math.sin(angle) - spineLength / 2;
-        node.style.transform =
-          "translate3d(" + x + "px," + y + "px,0) rotate(" + ((angle * 180) / Math.PI + 90) + "deg)";
-      });
+  const rotate = useCallback(
+    (dir: 1 | -1) => {
+      if (total === 0) return;
+      setWindowStart((start) => ((start + dir) % total + total) % total);
     },
-    [books.length, center],
+    [total],
   );
 
+  // 滚轮：一格一本（D09 的方向语义保留，改为离散滑动更可控）
+  const onWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const dir: 1 | -1 = e.deltaY > 0 ? 1 : -1;
+      rotate(dir);
+    },
+    [rotate],
+  );
+
+  // 拖拽：横向位移超过阈值才切换，且不吞掉点击
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    dragRef.current = { active: true, lastX: e.clientX };
-    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { x: e.clientX, moved: false };
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
-    if (drag === null || !drag.active) return;
-    const dx = e.clientX - drag.lastX;
-    drag.lastX = e.clientX;
-    if (rafRef.current !== null) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null;
-      applyRotation(dx);
-    });
-  };
-
-  const endDrag = () => {
-    const drag = dragRef.current;
-    dragRef.current = null;
     if (drag === null) return;
-    setBaseRad(rotationRef.current);
+    const dx = e.clientX - drag.x;
+    if (Math.abs(dx) < 40) return;
+    drag.moved = true;
+    drag.x = e.clientX;
+    rotate(dx > 0 ? -1 : 1);
   };
 
+  const onPointerUp = () => {
+    if (dragRef.current !== null) dragRef.current = null;
+  };
+
+  // 键盘
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (books.length === 0) return;
-      const slots = Math.max(books.length, RING.minSlots);
-      const step = (2 * Math.PI) / slots;
-      if (e.key === "ArrowRight") {
-        rotationRef.current -= step;
-        setBaseRad(rotationRef.current);
-      } else if (e.key === "ArrowLeft") {
-        rotationRef.current += step;
-        setBaseRad(rotationRef.current);
-      } else if (e.key === "Enter") {
-        const book = books[focusedIndex];
-        if (book !== undefined) onOpenBook(book.documentId);
+      if (total === 0) return;
+      if (e.key === "ArrowRight") rotate(1);
+      else if (e.key === "ArrowLeft") rotate(-1);
+      else if (e.key === "Enter") {
+        const entry = windowBooks.find((w) => w.slot === focusedSlot);
+        if (entry !== undefined) onOpenBook(entry.book.documentId);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [books, focusedIndex, onOpenBook]);
+  }, [focusedSlot, onOpenBook, rotate, total, windowBooks]);
 
   const spineLength = RING.spineHeightRatio * center.radius;
-  const focusedBook = books[focusedIndex];
+  const focusedEntry = windowBooks.find((w) => w.slot === focusedSlot);
 
-  if (books.length === 0) {
+  if (total === 0) {
     return (
       <div className="lg-home lg-home-empty" ref={hostRef}>
         <div className="lg-home-empty-card">
@@ -157,15 +162,12 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
     <div
       className="lg-home"
       ref={hostRef}
+      onWheel={onWheel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
-      role="application"
-      aria-label="文献空间：左右方向键旋转，回车打开"
+      onPointerUp={onPointerUp}
+      onPointerLeave={onPointerUp}
     >
-      {/* 环线：与书脊同一条定位路径（transform），避免 left/top 与 transform 混用导致偏移。
-          书脊实测正确、环线实测偏移，说明差异来自定位方式而非几何。 */}
       <div
         className="lg-home-ring"
         style={{
@@ -175,23 +177,22 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
         }}
       />
       {layouts.map((layout: SpineLayout) => {
-        if (!layout.visible) return null;
-        const book = books[layout.index];
-        if (book === undefined) return null;
-        const isFocused = layout.index === focusedIndex;
+        const entry = windowBooks.find((w) => w.slot === layout.index);
+        if (entry === undefined) return null;
+        const isFocused = layout.index === focusedSlot;
         return (
           <button
-            key={book.documentId}
+            key={entry.book.documentId}
             type="button"
             data-home-spine=""
             data-index={layout.index}
             className={"lg-spine" + (isFocused ? " is-focused" : "")}
-            title={book.title}
-            onClick={() => onOpenBook(book.documentId)}
+            title={entry.book.title}
+            onClick={() => onOpenBook(entry.book.documentId)}
             style={{
               width: RING.spineWidthPx,
               height: spineLength,
-              background: book.spineColor,
+              background: entry.book.spineColor,
               zIndex: layout.zIndex,
               opacity: layout.opacity,
               fontSize: layout.fontSize,
@@ -199,22 +200,24 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary }: HomeSpaceProps): 
                 "translate3d(" + layout.left + "px," + layout.top + "px,0) rotate(" + layout.rotationDeg + "deg) scale(" + layout.scale + ")",
             }}
           >
-            <span className="lg-spine-title">{book.title}</span>
+            <span className="lg-spine-title">{entry.book.title}</span>
           </button>
         );
       })}
-      {focusedBook !== undefined ? (
-        <div
-          className="lg-home-focused"
-          style={{ left: center.cx, top: center.cy + spineLength / 2 + 40 }}
-        >
-          <strong>{focusedBook.title}</strong>
+      {focusedEntry !== undefined ? (
+        <div className="lg-home-focused" style={{ left: center.cx, top: center.cy + spineLength / 2 + 40 }}>
+          <strong>{focusedEntry.book.title}</strong>
           <span>
-            {focusedBook.author ?? ""}
-            {focusedBook.progressPage !== null && focusedBook.pageCount !== null
-              ? " · 读到第 " + focusedBook.progressPage + " / " + focusedBook.pageCount + " 页"
+            {focusedEntry.book.author ?? ""}
+            {focusedEntry.book.progressPage !== null && focusedEntry.book.pageCount !== null
+              ? " · 读到第 " + focusedEntry.book.progressPage + " / " + focusedEntry.book.pageCount + " 页"
               : ""}
           </span>
+        </div>
+      ) : null}
+      {total > slots ? (
+        <div className="lg-home-hint">
+          共 {total} 本 · 滚轮或拖拽切换 · 当前第 {windowStart + 1} 本起
         </div>
       ) : null}
     </div>

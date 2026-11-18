@@ -186,53 +186,105 @@ pub fn run() {
 
             Ok(())
         })
-        .register_asynchronous_uri_scheme_protocol(PDF_SCHEME, |_app, request, responder| {
+        .register_asynchronous_uri_scheme_protocol(PDF_SCHEME, |app, request, responder| {
+            // 真实实现：按 document_id 从数据库解析绝对路径，用 Range 读文件。
+            // 之前这里永远返回内置 sample.pdf —— 这正是「打开任何书都只有一行字」的根因。
             let uri = request.uri().to_string();
             let range_header = request.headers().get("range").and_then(|v| v.to_str().ok());
 
-            // V-06 取证点：真实客户端请求时记录 URI 形态与 Range 头。
-            tracing::info!(%uri, range = ?range_header, method = %request.method(), "pdf:// 请求进入");
+            let respond = |status: u16, content_range: Option<String>, body: Vec<u8>, content_type: &str| {
+                let mut builder = tauri::http::Response::builder()
+                    .status(status)
+                    .header("Content-Type", content_type)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", body.len().to_string())
+                    .header("Access-Control-Allow-Origin", protocol::CORS_ALLOW_ORIGIN)
+                    .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                    .header("Access-Control-Allow-Headers", protocol::cors_allow_headers())
+                    .header("Access-Control-Expose-Headers", protocol::cors_expose_headers());
+                if let Some(value) = content_range {
+                    builder = builder.header("Content-Range", value);
+                }
+                builder.body(body).unwrap_or_else(|_| {
+                    tauri::http::Response::builder().status(500).body(Vec::new()).expect("构造 500 响应不应失败")
+                })
+            };
 
-            // 预检：Range 不在 CORS 安全列表内，必须先应答 OPTIONS。
-            let response = if request.method() == tauri::http::Method::OPTIONS {
-                protocol::preflight_response()
-            } else {
-                match protocol::parse_document_id(&uri) {
-                    Some(_doc_id) => {
-                        let sample: &[u8] = include_bytes!("../assets/sample.pdf");
-                        protocol::respond(sample, range_header)
-                    }
-                    None => {
-                        protocol::ProtocolResponse { status: 400, content_range: None, body: Vec::new() }
-                    }
+            if request.method() == tauri::http::Method::OPTIONS {
+                responder.respond(respond(204, None, Vec::new(), "text/plain"));
+                return;
+            }
+
+            let Some(doc_id) = protocol::parse_document_id(&uri) else {
+                tracing::warn!(%uri, "pdf:// 无法解析 document id");
+                responder.respond(respond(400, None, Vec::new(), "text/plain"));
+                return;
+            };
+
+            // Tauri 2 传入的是 UriSchemeContext，需先取 AppHandle 才能访问受管状态。
+            let handle = app.app_handle();
+            let state = handle.state::<AppState>();
+            let resolved = state.with_db(|db| {
+                let repos = db::repo::SqlRepos;
+                db.with_read(|conn| {
+                    use db::repo::DocumentRepo;
+                    repos.abs_path_of(conn, doc_id)
+                })
+            });
+
+            let path = match resolved {
+                Ok((abs_path, _, _, _)) => std::path::PathBuf::from(abs_path),
+                Err(err) => {
+                    tracing::warn!(document_id = doc_id, ?err, "pdf:// 找不到文档路径");
+                    responder.respond(respond(404, None, Vec::new(), "text/plain"));
+                    return;
                 }
             };
 
-            tracing::info!(
-                status = response.status,
-                content_range = ?response.content_range,
-                body_len = response.body.len(),
+            let size = match std::fs::metadata(&path) {
+                Ok(meta) => meta.len(),
+                Err(err) => {
+                    tracing::warn!(?path, ?err, "pdf:// 读取文件元数据失败");
+                    responder.respond(respond(404, None, Vec::new(), "text/plain"));
+                    return;
+                }
+            };
+
+            let outcome = protocol::parse_range(range_header, size);
+            let (status, content_range, body) = match outcome {
+                protocol::RangeOutcome::Full => match protocol::read_span(&path, 0, size) {
+                    Ok(bytes) => (200u16, None, bytes),
+                    Err(err) => {
+                        tracing::error!(?err, "pdf:// 读取失败");
+                        (500, None, Vec::new())
+                    }
+                },
+                protocol::RangeOutcome::Partial { start, end } => {
+                    let len = end.saturating_sub(start).saturating_add(1);
+                    match protocol::read_span(&path, start, len) {
+                        Ok(bytes) => (206, Some(format!("bytes {start}-{end}/{size}")), bytes),
+                        Err(err) => {
+                            tracing::error!(?err, "pdf:// 区间读取失败");
+                            (500, None, Vec::new())
+                        }
+                    }
+                }
+                protocol::RangeOutcome::Unsatisfiable => {
+                    (416, Some(format!("bytes */{size}")), Vec::new())
+                }
+                protocol::RangeOutcome::Invalid => (400, None, Vec::new()),
+            };
+
+            tracing::debug!(
+                document_id = doc_id,
+                %uri,
+                range = ?range_header,
+                status,
+                body_len = body.len(),
                 "pdf:// 响应"
             );
 
-            let mut builder = tauri::http::Response::builder()
-                .status(response.status)
-                .header("Content-Type", "application/pdf")
-                .header("Accept-Ranges", "bytes")
-                .header("Content-Length", response.body.len().to_string())
-                // CORS：缺任一条都会让前端 fetch 直接失败（实测 Type: Failed to fetch）
-                .header("Access-Control-Allow-Origin", protocol::CORS_ALLOW_ORIGIN)
-                .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-                .header("Access-Control-Allow-Headers", protocol::cors_allow_headers())
-                .header("Access-Control-Expose-Headers", protocol::cors_expose_headers());
-            if let Some(content_range) = response.content_range {
-                builder = builder.header("Content-Range", content_range);
-            }
-
-            let built = builder.body(response.body).unwrap_or_else(|_| {
-                tauri::http::Response::builder().status(500).body(Vec::new()).expect("构造 500 响应不应失败")
-            });
-            responder.respond(built);
+            responder.respond(respond(status, content_range, body, "application/pdf"));
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,
