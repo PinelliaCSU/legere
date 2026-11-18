@@ -1,10 +1,11 @@
-// 应用装配：日志 -> 协议壳 -> Command 注册 -> 事件。
-// pdf:// 的 glue 以 Tauri 2 的 register_asynchronous_uri_scheme_protocol 为准。
+// 应用装配：日志 -> 数据库 -> 协议壳 -> Command 注册 -> 事件。
+//
 // 注意：本机环境 WebView2 窗口创建被拒绝（PermissionDenied），因此运行时探针 V-06
 // 只能在具备桌面 WebView2 权限的机器上关闭；逻辑侧的 Range/URI 判定已有单测覆盖。
 
 pub mod commands;
 pub mod contracts;
+pub mod db;
 pub mod error;
 pub mod logging;
 pub mod protocol;
@@ -37,6 +38,24 @@ pub fn run() {
                 }
             }
 
+            // 数据库：打开/迁移失败属于致命问题，必须显式报错而不是静默降级。
+            let db_path = data_dir.join("legere.db");
+            match db::Db::open(&db_path) {
+                Ok(handle) => {
+                    tracing::info!(
+                        db = ?handle.path(),
+                        fts5 = handle.capabilities().fts5,
+                        contentless_delete = handle.capabilities().contentless_delete,
+                        "数据库就绪"
+                    );
+                    app.manage(handle);
+                }
+                Err(err) => {
+                    eprintln!("数据库初始化失败: {err:?}");
+                    return Err(Box::new(std::io::Error::other(format!("db init failed: {err:?}"))) as Box<dyn std::error::Error>);
+                }
+            }
+
             app.emit(
                 contracts::evt::E_APP_READY,
                 contracts::evt::AppReadyPayload { version: commands::VERSION.to_string() },
@@ -46,12 +65,12 @@ pub fn run() {
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol(PDF_SCHEME, |_app, request, responder| {
-            // M01 阶段：只解析路由与 Range，返回内置样本；真实取文件由 M04 的
+            // M01/M03 阶段：只解析路由与 Range，返回内置样本；真实取文件由 M04 的
             // DocumentPathResolver 提供（docs/05 §12），届时替换此处实现。
             let uri = request.uri().to_string();
             let range_header = request.headers().get("range").and_then(|v| v.to_str().ok());
 
-            // V-06 取证点：这一行会在真实客户端请求时记录 URI 形态与 Range 头。
+            // V-06 取证点：真实客户端请求时记录 URI 形态与 Range 头。
             tracing::info!(
                 %uri,
                 range = ?range_header,
@@ -95,7 +114,11 @@ pub fn run() {
             });
             responder.respond(built);
         })
-        .invoke_handler(tauri::generate_handler![commands::ping, commands::app_info])
+        .invoke_handler(tauri::generate_handler![
+            commands::ping,
+            commands::app_info,
+            commands::db_integrity_check
+        ])
         .run(tauri::generate_context!())
         .expect("Legere 启动失败");
 }
