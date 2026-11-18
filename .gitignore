@@ -2,7 +2,14 @@ node_modules/
 dist/
 target/
 src-tauri/target/
+src-tauri/gen/
 *.log
 logs/
 artifacts/
+.pnpm-store/
 .DS_Store
+# 本机构建绕过（本地 crates 镜像配置与缓存，见 docs/18 报告）
+.cargo/
+.cargo-home/
+.probe-logs/
+.webview2/
