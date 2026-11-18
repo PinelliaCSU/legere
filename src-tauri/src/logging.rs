@@ -11,7 +11,10 @@ pub struct LogGuard {
     pub log_dir: PathBuf,
 }
 
-pub fn init(log_dir: &Path) -> Result<LogGuard, std::io::Error> {
+/// 目录可由 `LEGERE_LOG_DIR` 覆盖：仅用于开发期探针把日志写到工作区内，默认仍为 appDataDir/logs。
+pub fn init(default_dir: &Path) -> Result<LogGuard, std::io::Error> {
+    let overridden = std::env::var_os("LEGERE_LOG_DIR").map(std::path::PathBuf::from);
+    let log_dir = overridden.as_deref().unwrap_or(default_dir);
     std::fs::create_dir_all(log_dir)?;
 
     let appender = tracing_appender::rolling::daily(log_dir, "legere.log");
