@@ -86,11 +86,60 @@ async function runLibraryProbe(): Promise<LibProbe[]> {
   return out;
 }
 
+
+// M09–M11 探针：扫描 → 入队索引 → 搜索（M14 接入后随冒烟壳移除）。
+async function runSearchProbe(): Promise<LibProbe[]> {
+  const out: LibProbe[] = [];
+  try {
+    const page = await call(CMD.DOCUMENT_LIST, {
+      query: { sort: "recent", order: "desc", offset: 0, limit: 50 },
+    });
+    out.push({ step: "1 待索引文档", detail: `total=${page.total}` });
+
+    for (const doc of page.items) {
+      await call(CMD.INDEX_ENQUEUE, { documentId: doc.id, priority: 0 });
+    }
+    out.push({ step: "2 已入队", detail: `${page.items.length} 个任务（priority=0 前台优先）` });
+
+    await new Promise((r) => setTimeout(r, 4000));
+
+    const status = await call(CMD.INDEX_STATUS, {});
+    out.push({ step: "3 索引状态", detail: `indexed=${status.documentsIndexed} failed=${status.documentsFailed} noText=${status.documentsNoText} queued=${status.queued}` });
+
+    const detail = page.items[0] !== undefined ? await call(CMD.DOCUMENT_GET, { id: page.items[0].id }) : null;
+    if (detail !== null) {
+      out.push({ step: "4 文档状态", detail: `textState=${detail.textState} pageCount=${String(detail.pageCount)}` });
+    }
+
+    const found = await call(CMD.SEARCH_GLOBAL, {
+      params: { query: "Legere", mode: "phrase", hitsPerDocument: 3, documentOffset: 0, documentLimit: 10 },
+    });
+    out.push({ step: "5 搜索 Legere", detail: `documents=${found.totalDocuments} tookMs=${found.tookMs}` });
+    const firstHit = found.items[0]?.hits[0];
+    out.push({ step: "6 首个命中", detail: firstHit ? `p${firstHit.pageNo} 「${firstHit.snippet}」 ranges=${JSON.stringify(firstHit.ranges)}` : "(无)" });
+
+    const counts = await call(CMD.SEARCH_GLOBAL_COUNT, {
+      params: { query: "Legere", mode: "phrase", hitsPerDocument: 3, documentOffset: 0, documentLimit: 10 },
+    });
+    out.push({ step: "7 计数", detail: `documents=${counts.documents} pages=${counts.pages}` });
+
+    const miss = await call(CMD.SEARCH_GLOBAL, {
+      params: { query: "不存在的词组合", mode: "phrase", hitsPerDocument: 3, documentOffset: 0, documentLimit: 10 },
+    });
+    out.push({ step: "8 无命中", detail: `documents=${miss.totalDocuments}` });
+  } catch (err) {
+    const msg = err instanceof IpcError ? `${err.code}: ${err.detail ?? err.message}` : String(err);
+    out.push({ step: "失败", detail: msg });
+  }
+  return out;
+}
+
 export default function App(): ReactElement {
   const [status, setStatus] = useState<Status>({ kind: "probing" });
   const [readyEvent, setReadyEvent] = useState<string | null>(null);
   const [probes, setProbes] = useState<ProbeResult[]>([]);
   const [libProbes, setLibProbes] = useState<LibProbe[]>([]);
+  const [searchProbes, setSearchProbes] = useState<LibProbe[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -121,6 +170,8 @@ export default function App(): ReactElement {
     void (async () => {
       const lib = await runLibraryProbe();
       if (alive) setLibProbes(lib);
+      const searchLine = await runSearchProbe();
+      if (alive) setSearchProbes(searchLine);
     })();
     return () => {
       alive = false;
@@ -152,6 +203,15 @@ export default function App(): ReactElement {
   return (
     <main>
       <h1>Legere</h1>
+          <h2>检索链探针（M09–M11）</h2>
+          <ul>
+            {searchProbes.map((p) => (
+              <li key={p.step}>
+                <strong>{p.step}</strong>：{p.detail}
+              </li>
+            ))}
+          </ul>
+
           <h2>文献库探针（M04）</h2>
           <ul>
             {libProbes.map((p) => (

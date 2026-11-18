@@ -1,3 +1,4 @@
+pub mod index;
 pub mod library;
 
 // Command 层只做参数校验 + DTO 转换，不写 SQL、不解析 PDF（docs/03 §M01）。
