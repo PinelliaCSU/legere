@@ -130,3 +130,41 @@ $ node scripts/check-contracts.mjs   -> exit 0（18 DTO / 28 Command / 12 错误
 
 - `pnpm build` / `vite build`：esbuild 的 postinstall 与服务需要 piped stdio 子进程，本会话禁止（`spawn EPERM`）；`node_modules` 中 `picomatch` 亦未落盘。**前端打包链路未验证**（`tsc --noEmit` 已覆盖类型正确性）。
 - 端到端 GUI：同上（WebView2 被拒）。
+
+---
+
+## 9. M03 首片（数据库内核）执行记录（2026-11-18）
+
+**status: ready**（构建与 20 条单测全绿）
+
+### 9.1 交付内容
+
+| 文件 | 作用 |
+|---|---|
+| `src-tauri/migrations/001_init.sql` | 8 张表 + FTS5 虚表，含 R17 的 `abs_path_key`/`rel_path_key` |
+| `src-tauri/src/db/mod.rs` | 打开库、PRAGMA（WAL/foreign_keys/busy_timeout/synchronous）、迁移（只增不改 + 幂等）、写连接串行化、只读连接、UTC 时间格式化 |
+| `src-tauri/src/db/probe.rs` | FTS5 与 `contentless_delete` 能力探针（V-03 的实现侧） |
+| `src-tauri/src/db/repo.rs` | `LibraryRootRepo`/`DocumentRepo`/`SettingsRepo` + `insert_page_with_fts`/`delete_document_index`（rowid 绑定的唯一实现点） |
+| `src-tauri/src/db/integrity.rs` | 一致性自检（只报告不修改） |
+| `src-tauri/src/db/tests.rs` | 7 条测试：迁移幂等、能力探针、库根 CRUD、路径 key 大小写、软删除、FTS rowid 绑定与级联、设置往返 |
+| `commands::app_info` | `ftsEnabled`/`contentlessDelete` 改为来自真实探针（不再是占位） |
+| `commands::db_integrity_check` | 新增，对应契约 §3 第 28 行 |
+
+### 9.2 命令与结果
+
+```text
+$ cargo build      -> Finished dev profile
+$ cargo test       -> 20 passed; 0 failed（exit 0）
+$ pnpm typecheck   -> exit 0
+$ node scripts/check-contracts.mjs -> 18 DTO / 28 Command / 12 错误码一致（exit 0）
+```
+
+### 9.3 过程中修掉的两个真实缺陷
+
+1. **迁移脚本与代码重复建表**：001 里 `CREATE TABLE schema_migrations` 与 `run_migrations` 的 `CREATE TABLE IF NOT EXISTS` 冲突，导致所有 DB 测试失败。已改为「只由代码建表」，并在 docs/04 §5 记下该坑。
+2. **`io_err` 类型推断失败**：`DomainError::Io(err).into()` 在没有上下文时无法推断目标类型，改为显式 `let api: ApiError = ...`。
+
+### 9.4 本机环境补充事实（影响后续模块）
+
+- `rusqlite` bundled 需要通过 MSVC 编译 SQLite；本机 `cl.exe` 在默认 `TEMP`（`%LOCALAPPDATA%\Temp`）下报 `D8050（无法执行 c1.dll：未能将命令行放入调试记录中）`。把 `TMP`/`TEMP` 指到工作区 `.tmp/` 后编译正常。CI 与其它机器若遇同样错误，按此处理。
+- 编译 SQLite 时开启了 `SQLITE_ENABLE_FTS5`（cc-rs 输出的宏里有 `-DSQLITE_ENABLE_FTS5`），与 04 §7 依赖一致。

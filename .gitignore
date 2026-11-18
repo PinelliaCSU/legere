@@ -13,3 +13,4 @@ artifacts/
 .cargo-home/
 .probe-logs/
 .webview2/
+.tmp/

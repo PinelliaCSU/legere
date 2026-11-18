@@ -168,6 +168,7 @@ CREATE TABLE app_settings (
 ## 5. 迁移方案
 
 - 迁移文件：`src-tauri/migrations/001_init.sql`、`002_xxx.sql`…，用 `include_str!` 嵌入二进制。
+- `schema_migrations` 由 `db::run_migrations` 负责创建（必须先读版本号），**迁移脚本内不得重复建表** —— 首版曾因 001 里重复 `CREATE TABLE schema_migrations` 导致迁移失败（2026-11-18 修正）。
 - 启动流程：读 `schema_migrations.max(version)` → 顺序执行未应用文件（每个文件一个事务）→ 插入版本行。
 - 迁移**只增不改**：禁止修改已发布迁移文件；修正必须新增迁移。
 - 迁移失败：应用进入只读降级状态并在 UI 顶部显示 `E_DB` 错误，不得静默继续。
