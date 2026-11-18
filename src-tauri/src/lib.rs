@@ -161,7 +161,7 @@ pub fn run() {
                             for (candidate, error) in &errors {
                                 msg.push_str(&format!("- {} => {}\n", candidate, error));
                             }
-                            msg.push_str("\n处理建议：关闭其它 Legere 窗口后重试；仍失败可把 WebView2 默认目录下的 EBWebView 改名后再启动。\n");
+                            msg.push_str("\n处理建议：\n  1. 关闭其它 Legere 窗口后重试；\n  2. 仍失败可把 WebView2 默认目录下的 EBWebView 改名后再启动；\n  3. 三个目录全失败时，先检查这个 exe 的完整性标签：\n     icacls legere.exe\n     若出现 \"Low Mandatory Level\"，说明它是被低完整性进程构建出来的：低完整性进程\n     既写不了 AppData，也起不了 WebView2。执行下面这行改回 Medium 后重试：\n     icacls legere.exe /setintegritylevel Medium\n");
                             let _ = std::fs::write(dir.join("startup-error.txt"), msg);
                         }
                         // 没有窗口就不要留一个僵尸进程在后台：任务管理器里会看到一个「看不见的 Legere」，
