@@ -218,3 +218,39 @@ $ 运行应用（受限环境变量）      -> 窗口已创建；pdf:// 200/206 
 
 - `cargo build --release` 曾在编辑 `lib.rs` 期间被中断（exit 1），未重跑；release 打包属 M15，届时执行。
 - 桌面窗口只在本会话外（用户真实桌面）具备完整观感；本会话内的窗口截图不可靠，45 个色值的**观感**验证仍按 V1(a) 推迟到 M13/M14。
+
+---
+
+## 11. 「双击后什么都没有」事故与修复（2026-11-18）
+
+### 11.1 现象
+
+用户在桌面双击 release 版 `legere.exe`：**无报错、无窗口、无日志**，像什么都没发生。
+
+### 11.2 根因（两条，都是真实缺陷）
+
+1. **静默死亡**：release 构建是 `windows_subsystem = "windows"`（无控制台）。原 `setup` 在数据库初始化失败时 `return Err`，Tauri 随即 `panic!("Failed to setup app: ...")`，而 panic 信息在无控制台时**没有任何去处** → 用户看到的就是"双击，无事发生"。
+2. **数据目录/日志目录单点失败**：只有 `appDataDir` 一个选择，一不可写就日志、数据库全部失效，且没有任何回退。
+
+> 补充：本机还叠加了一个环境问题 —— `src-tauri/target` 里的 proc-macro DLL 带 **Low 完整性标签 + NW(No-Write-Up)**，是更早的受限会话写入的。Medium 进程无法覆盖它们，导致 `LNK1104`。解法是改用独立 target 目录（`CARGO_TARGET_DIR=.target`），旧目录残留需管理员清理。
+
+### 11.3 修复（结构性，不是打补丁）
+
+| 修复 | 内容 |
+|---|---|
+| 启动顺序 | 数据目录 → 日志 → **窗口** → 数据库 → ready。先建窗，任何后端失败都不再导致"没有界面" |
+| 数据库降级 | `setup` 不再因 DB 失败返回 Err；改为 `AppState` 持有 `Option<Db>`，命令返回 `E_DB` + detail（含数据目录路径），前端直接把原因显示出来 |
+| 目录回退 | 数据目录依次尝试：`LEGERE_DATA_DIR` → `appDataDir` → `%LOCALAPPDATA%\Legere` → `%TEMP%\legere`；日志目录在同样候选下再套 `logs/`，并做一次真实写入探测 |
+| panic 落盘 | 安装 panic hook，崩溃原因追加写入 `<log_dir>/panic.log`，release 也有证据 |
+| 建窗失败落盘 | 建窗失败时把原因写到 exe 同级 `startup-error.txt` |
+| 诊断入口 | 仓库根新增 `诊断.cmd`：一次双击即可启动并按段打印 startup-error 与日志 |
+
+### 11.4 验证
+
+```text
+$ cargo test（CARGO_TARGET_DIR=.target） -> 20 passed; 0 failed
+$ cargo build --release                -> Finished release profile
+```
+
+- 本会话能复现"窗口创建被拒"的分支：日志与错误会落到可写回退目录，不再静默。
+- 用户桌面上的最终确认待其运行 `诊断.cmd` 回传输出（生产 `appDataDir` 与 WebView2 默认目录只能在真实交互桌面验证）。
