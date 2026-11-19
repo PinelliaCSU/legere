@@ -27,7 +27,12 @@ import {
   parseDefaultScale,
 } from "../settings/reader-prefs";
 import { RootRemoveDialog, RootRenameDialog, RootReplaceDialog } from "./LibraryDialogs";
+import { LAST_READ_SETTING_KEY, parseLastDocumentId, pickLastRead, type LastReadDoc } from "./last-read";
+import { LastReadCard } from "./LastReadCard";
+import { LibraryTree } from "./LibraryTree";
+import { buildForest, flattenFolders, inFolder, type FolderDoc, type TreeRow } from "./library-tree";
 import { useAppStore } from "./router";
+import { displayTitle } from "./title-clean";
 
 /// 索引状态文案（docs/16 §3 的用词：无文本 / 索引失败 / 正在建立索引）。
 /// 之前直接渲染 TextState 的英文枚举值，属于把内部状态泄漏到界面上。
@@ -39,11 +44,19 @@ const TEXT_STATE_TEXT: Record<TextState, string> = {
   failed: "索引失败",
 };
 
+/// 全库书籍分页拉取：后端 document_list 的 MAX_LIMIT 就是 200，这里跟着走。
+const ALL_DOCS_PAGE = 200;
+/// 文件夹树的数据上限。超过这个量级该换成后端聚合，而不是往 DOM 里塞两万行。
+const ALL_DOCS_MAX = 2000;
+/// 单屏列表渲染上限：几千行 DOM 会拖慢滚动，超出部分提示用文件夹/过滤词收窄。
+const LIBRARY_LIST_CAP = 500;
+
 function toHomeBook(doc: DocumentDto): HomeBook {
   return {
     documentId: doc.id,
     fileName: doc.fileName,
-    title: doc.pdfTitle ?? doc.fileName.replace(/\.pdf$/i, ""),
+    // 需求 3：文件名只做显示层清洗，pdf 元数据标题是有意义信息，不清洗。
+    title: displayTitle(doc.pdfTitle, doc.fileName),
     author: doc.pdfAuthor,
     spineColor: spineColorFor(doc.id),
     pageCount: doc.pageCount,
@@ -82,6 +95,14 @@ export function AppShell(): ReactElement {
   /// 阅读默认值（设置项 reader.defaultMode / reader.defaultScale）。
   const [defaultMode, setDefaultMode] = useState<ReadMode>("continuous");
   const [defaultScale, setDefaultScale] = useState(1);
+  /// 全库书籍：文件夹树需要完整数据集，不能用「最近 100 本」那份。
+  const [allDocs, setAllDocs] = useState<DocumentDto[]>([]);
+  /// 文件夹树展开状态（key 见 library-tree.folderKey）。
+  const [expandedFolders, setExpandedFolders] = useState<ReadonlySet<string>>(new Set());
+  /// 当前选中的文件夹；null = 全部文献。
+  const [selectedFolder, setSelectedFolder] = useState<{ rootId: number; path: string } | null>(null);
+  /// 启动续读只做一次，避免 refresh 引起的重渲染反复跳进阅读器。
+  const resumeTriedRef = useRef(false);
 
 
   /// 拉文献列表：有过滤词就走 document_list（后端按 file_name/pdf_title 做 LIKE），
@@ -100,18 +121,32 @@ export function AppShell(): ReactElement {
     setFilterTotal(page.total);
   }, []);
 
+  /// 分页拿全库书籍（文件夹树的数据源）。失败不阻塞其它加载：保留上一次的结果。
+  const loadAllDocuments = useCallback(async () => {
+    const acc: DocumentDto[] = [];
+    for (let offset = 0; offset < ALL_DOCS_MAX; offset += ALL_DOCS_PAGE) {
+      const page = await call(CMD.DOCUMENT_LIST, {
+        query: { sort: "name", order: "asc", offset, limit: ALL_DOCS_PAGE },
+      });
+      acc.push(...page.items);
+      if (page.items.length === 0 || acc.length >= page.total) break;
+    }
+    setAllDocs(acc);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const [, rootList] = await Promise.all([
         loadDocuments(filterRef.current),
         call(CMD.LIBRARY_ROOT_LIST, {}),
+        loadAllDocuments(),
       ]);
       setRoots(rootList);
     } catch (err) {
       const e = err as { code?: string };
       setStatus("读取文献库失败：" + (e.code ?? "E_INTERNAL"));
     }
-  }, [loadDocuments]);
+  }, [loadAllDocuments, loadDocuments]);
 
   // 过滤词变化 → 250ms 防抖后重新查询（每敲一个字符都查一次会把索引打满）。
   useEffect(() => {
@@ -169,6 +204,39 @@ export function AppShell(): ReactElement {
     void call(CMD.SETTINGS_SET, { key, value }).catch(() => undefined);
   }, []);
 
+  // 需求 5：打开书就记住它；从阅读器退回主页就忘掉它。
+  // 于是「退出应用时正在读书」== 设置仍在 == 下次启动直接回到那本书。
+  const openBook = useCallback(
+    (documentId: number) => {
+      openDocument(documentId);
+      persistSetting(LAST_READ_SETTING_KEY, String(documentId));
+    },
+    [openDocument, persistSetting],
+  );
+
+  const leaveReader = useCallback(() => {
+    closeDocument();
+    persistSetting(LAST_READ_SETTING_KEY, "");
+  }, [closeDocument, persistSetting]);
+
+  // 启动续读（需求 5）：设置里还留着 reader.lastDocumentId，说明上次是「正在读书」退出的。
+  // 书的记录可能已被移除，所以先用 document_get 探一次；任何失败都留在主页，不阻塞启动。
+  useEffect(() => {
+    if (!ready || resumeTriedRef.current) return;
+    resumeTriedRef.current = true;
+    void (async () => {
+      try {
+        const all = await call(CMD.SETTINGS_GET_ALL, {});
+        const id = parseLastDocumentId(all[LAST_READ_SETTING_KEY]);
+        if (id === null) return;
+        await call(CMD.DOCUMENT_GET, { id });
+        openBook(id);
+      } catch {
+        // 续读是锦上添花，失败不提示。
+      }
+    })();
+  }, [ready, openBook]);
+
   // 右键不再弹 WebView 自带的菜单（重新加载/另存为/检查——那是调试菜单，不是桌面应用的菜单）。
   // 阅读器会把它换成自己的功能面板（见 ReaderView 的 contextmenu 处理）；
   // 其余页面只是不再露出原生菜单。输入框/文本域保留系统菜单，否则粘贴没法用。
@@ -218,6 +286,71 @@ export function AppShell(): ReactElement {
   }, []);
 
   const books = useMemo(() => documents.map(toHomeBook), [documents]);
+
+  // ── 文献库文件夹层级（需求 2）──
+  // allDocs 是树的数据源；万一分页拉取失败就退回列表那份，至少还能用。
+  const libraryDocs = useMemo(() => (allDocs.length > 0 ? allDocs : documents), [allDocs, documents]);
+  const folderDocsInput: FolderDoc[] = useMemo(
+    () => libraryDocs.map((doc) => ({ documentId: doc.id, libraryRootId: doc.libraryRootId, relPath: doc.relPath })),
+    [libraryDocs],
+  );
+  const forest = useMemo(
+    () => buildForest(roots.map((root) => ({ id: root.id, label: rootLabel(root) })), folderDocsInput),
+    [roots, folderDocsInput],
+  );
+  const treeRows = useMemo(() => flattenFolders(forest, expandedFolders), [forest, expandedFolders]);
+
+  // 列表数据：有过滤词时用后端命中结果（不是前端假过滤），再按当前文件夹收窄。
+  const scopedDocs = useMemo(() => {
+    const source = filter.trim().length > 0 ? documents : libraryDocs;
+    if (selectedFolder === null) return source;
+    return source.filter(
+      (doc) => doc.libraryRootId === selectedFolder.rootId && inFolder(doc.relPath, selectedFolder.path),
+    );
+  }, [documents, filter, libraryDocs, selectedFolder]);
+
+  const visibleDocs = scopedDocs.slice(0, LIBRARY_LIST_CAP);
+  const hiddenDocCount = scopedDocs.length - visibleDocs.length;
+
+  const scopeRow =
+    selectedFolder === null
+      ? null
+      : treeRows.find((row) => row.rootId === selectedFolder.rootId && row.path === selectedFolder.path) ?? null;
+  const scopeLabel =
+    selectedFolder === null
+      ? "全部文献"
+      : scopeRow?.name ?? (selectedFolder.path.length > 0 ? selectedFolder.path : "文献库");
+
+  const selectFolder = useCallback((row: TreeRow) => {
+    setSelectedFolder({ rootId: row.rootId, path: row.path });
+    // 选中即展开一层，避免「点了文件夹却还是空白」。
+    if (row.hasChildren) {
+      setExpandedFolders((prev) => (prev.has(row.key) ? prev : new Set(prev).add(row.key)));
+    }
+  }, []);
+
+  const toggleFolder = useCallback((row: TreeRow) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(row.key)) next.delete(row.key);
+      else next.add(row.key);
+      return next;
+    });
+  }, []);
+
+  // ── 上次阅读（需求 5）──
+  const lastRead = useMemo<LastReadDoc | null>(() => {
+    const list: LastReadDoc[] = libraryDocs.map((doc) => ({
+      documentId: doc.id,
+      title: displayTitle(doc.pdfTitle, doc.fileName),
+      author: doc.pdfAuthor,
+      pageCount: doc.pageCount,
+      progressPage: doc.progressPage,
+      lastOpenedAt: doc.lastOpenedAt,
+    }));
+    return pickLastRead(list);
+  }, [libraryDocs]);
+  const nowForLastRead = useMemo(() => new Date(), [lastRead]);
 
   // 注意：WebView2 不支持 window.prompt，必须用应用内输入框（否则按钮点了没反应）。
   const onAddLibrary = useCallback(async (rawPath: string) => {
@@ -326,9 +459,14 @@ export function AppShell(): ReactElement {
         <HomeSpace
           books={books}
           active={route === "home"}
-          onOpenBook={(id) => openDocument(id)}
+          onOpenBook={openBook}
           onAddLibrary={() => setAddOpen(true)}
         />
+
+        {/* 需求 5：上次阅读版块。只在主页显示，且不参与转盘几何。 */}
+        {route === "home" && lastRead !== null ? (
+          <LastReadCard doc={lastRead} now={nowForLastRead} onContinue={openBook} />
+        ) : null}
 
         {route === "library" ? (
           <section className="lg-library">
@@ -347,7 +485,9 @@ export function AppShell(): ReactElement {
                 }}
               />
               <span className="lg-muted">
-                {filterTotal !== null ? filterTotal + " 本匹配" : documents.length + " 本"}
+                {scopedDocs.length +
+                  " 本" +
+                  (filterTotal !== null ? "（全库匹配 " + filterTotal + " 本）" : "")}
               </span>
             </div>
             <section className="lg-roots" aria-label="文献库">
@@ -380,24 +520,55 @@ export function AppShell(): ReactElement {
               )}
             </section>
 
-            <ul className="lg-doc-list">
-              {documents.map((doc) => (
-                <li key={doc.id}>
-                  <button type="button" onClick={() => openDocument(doc.id)}>
-                    <span className="lg-doc-title">{doc.pdfTitle ?? doc.fileName}</span>
-                    <span className="lg-doc-meta">{doc.pageCount !== null ? doc.pageCount + " 页" : "页数未知"}</span>
-                    <span className="lg-doc-meta">{TEXT_STATE_TEXT[doc.textState]}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <div className="lg-library-body">
+              {/* 需求 2：按 rel_path 还原的文件夹层级（渲染在 LibraryTree.tsx）。 */}
+              <LibraryTree
+                rows={treeRows}
+                totalCount={libraryDocs.length}
+                selected={selectedFolder}
+                onSelectAll={() => setSelectedFolder(null)}
+                onSelectRow={selectFolder}
+                onToggleRow={toggleFolder}
+              />
+
+              <section className="lg-library-list">
+                <div className="lg-library-list-head">
+                  <h2>{scopeLabel}</h2>
+                  <span className="lg-muted">{scopedDocs.length} 本</span>
+                </div>
+                {scopedDocs.length === 0 ? (
+                  <p className="lg-library-empty">
+                    {libraryDocs.length === 0 ? "还没有文献，先添加文献库" : "这个文件夹里没有匹配的文献"}
+                  </p>
+                ) : (
+                  <ul className="lg-doc-list">
+                    {visibleDocs.map((doc) => (
+                      <li key={doc.id}>
+                        <button type="button" onClick={() => openBook(doc.id)} title={doc.relPath}>
+                          <span className="lg-doc-title">{displayTitle(doc.pdfTitle, doc.fileName)}</span>
+                          <span className="lg-doc-meta">
+                            {doc.pageCount !== null ? doc.pageCount + " 页" : "页数未知"}
+                          </span>
+                          <span className="lg-doc-meta">{TEXT_STATE_TEXT[doc.textState]}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {hiddenDocCount > 0 ? (
+                  <p className="lg-library-empty">
+                    已显示前 {LIBRARY_LIST_CAP} 本，用左侧文件夹或过滤词收窄范围（还有 {hiddenDocCount} 本未显示）
+                  </p>
+                ) : null}
+              </section>
+            </div>
           </section>
         ) : null}
 
         {route === "reader" && activeDocumentId !== null ? (
           <ReaderView
             documentId={activeDocumentId}
-            onExit={closeDocument}
+            onExit={leaveReader}
             onProgress={saveProgress(activeDocumentId)}
           />
         ) : null}
@@ -588,7 +759,7 @@ export function AppShell(): ReactElement {
                   <ul>
                     {group.hits.map((hit) => (
                       <li key={hit.pageNo}>
-                        <button type="button" onClick={() => openDocument(group.documentId)}>
+                        <button type="button" onClick={() => openBook(group.documentId)}>
                           p{hit.pageNo} {hit.snippet}
                         </button>
                       </li>

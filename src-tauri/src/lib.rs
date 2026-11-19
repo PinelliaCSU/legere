@@ -84,6 +84,9 @@ fn build_main_window(
                 contracts::evt::AppReadyPayload { version },
             );
         });
+        // v0.11 程序图标：exe 的文件/窗口图标由 tauri-build 在编译期从
+        // icons/icon.ico（源自 design_pictures/legereicon.png）嵌入 Windows 资源段，
+        // 窗口因此继承进程图标；无需运行期解码 PNG，也就不引入 image 依赖。
         if let Some(dir) = &dir {
             std::fs::create_dir_all(dir).ok();
             builder = builder.data_directory(dir.clone());
