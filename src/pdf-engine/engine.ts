@@ -37,6 +37,17 @@ import { buildTextContent, toTextItem } from "./text-content";
 
 export { PdfEngineError } from "./error-map";
 
+/// pdf:// 单次 Range 的分段大小（P1-1，量测见 docs/20 §4.2-B）。
+///
+/// pdfjs 默认 64 KiB（pdfjs-dist/build/pdf.mjs:16209，文档 types/…/api.d.ts:661-662）。
+/// 两条实测事实决定了这个值：
+/// 1. 进入 range 路径的门槛是 contentLength > 2 × rangeChunkSize（pdf.mjs:13391），
+///    所以 4 MiB 只对 > 8 MiB 的文档生效；
+/// 2. 一旦生效，请求数从 157 降到 4、首屏 229ms → 160ms（300 页 / 10.2MB 样本，本机）。
+/// 必须 ≤ 协议侧 RANGE_MAX_BYTES = 8 MiB（src-tauri/src/protocol/range.rs:8，
+/// 超出会被截断，pdfjs 会当成区间不完整）。
+const RANGE_CHUNK_BYTES = 4 * 1024 * 1024;
+
 /// 打开序号：同一 docId 又发起打开时，旧的那次结果必须丢弃。
 const openSequenceByDocId = new Map<number, number>();
 let openSequence = 0;
@@ -289,6 +300,12 @@ export const pdfEngine: PdfEngine = {
         standardFontDataUrl: resources.standardFontDataUrl,
         wasmUrl: resources.wasmUrl,
         iccUrl: resources.iccUrl,
+        rangeChunkSize: RANGE_CHUNK_BYTES,
+        // disableAutoFetch 保持默认 false（P1-1 量测结论，docs/20 §4.2-C）：
+        // 打开 disableAutoFetch + disableStream 只把打开后 3 秒内的传输从 20.79MB 压到
+        // 11.05MB（−46.8%），却把首屏从 264ms 推到 324ms（+22.6%）、请求数 155→165，
+        // 而且它挡不住 pdf.js 首个「无 Range 的整文件 GET」（pdf.mjs:13481-13502）——
+        // 省的是重复的那一份，不是整文件。
       });
       const doc = await loadingTask.promise;
       if (openSequenceByDocId.get(docId) !== sequence) {

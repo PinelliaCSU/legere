@@ -83,14 +83,14 @@
 
 ### M06 render-scheduler
 - 所属层：TS
-- 核心职责：视口模型（模式、缩放、滚动位置）→ 可见页集合与预取窗口；优先级队列；并发上限；过期任务取消；Canvas LRU（字节预算）；TextContent LRU；`dispose` 全量释放；向订阅者广播「页就绪」。
+- 核心职责：视口模型（模式、缩放、滚动位置）→ 可见页集合与预取窗口；优先级队列（含滚动方向偏好与缩放失配，见 08 §3）；并发上限（覆盖 getPage 与取文本阶段）；过期任务取消；Canvas LRU（字节预算）；TextContent LRU；`dispose` 全量释放；向订阅者广播「页就绪」；**文本提取的唯一入口**（`getTextContent` / `prefetchText`，M07 的文本层与文内搜索都走它，05 §7 的 R25）。
 - 不负责：解析 PDF 字节；DOM 布局与样式；用户交互手势。
 - 输入：`setViewport()`、`setDocument(handle)`、`subscribe(handler)`。
 - 输出：`PageRenderState`（idle/queued/rendering/ready/error + bitmap + scale）。
 - 依赖：M05。
 - 对外接口：见 05 §7。
 - 关键数据结构：`ViewportState { mode, scale, scrollTop, viewportHeight, viewportWidth, pageGeometries }`、`RenderBudget { maxConcurrent, cacheBytes, prefetchPages }`（以 05 §7 为准）。
-- 需测试：快速滚动不爆任务数；缩放取消旧任务；LRU 逐出后重渲；`dispose` 后无残留 renderTask。
+- 需测试：快速滚动不爆任务数；缩放取消旧任务；LRU 逐出后重渲；`dispose` 后无残留 renderTask；并发上限覆盖 getPage 阶段；同一页在在飞期间不重复启动；文本缓存跨调用复用（同一页只提取一次）。
 
 ### M07 reader-interaction
 - 所属层：React

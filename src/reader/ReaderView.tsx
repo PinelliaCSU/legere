@@ -21,19 +21,28 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { API_ERROR_TEXT, isApiErrorCode } from "../contracts/errors";
 import { pdfEngine } from "../pdf-engine";
 import type { DocumentHandle, PageGeometry, TextContentHandle } from "../pdf-engine/types";
-import { anchorScrollTop, createRenderScheduler, computePageBoxes, currentPageAt, PAGE_GAP, READER_PADDING, type PageRenderState, type ReadMode } from "../render";
+import { anchorScrollTop, createIdleTextPrefetcher, createRenderScheduler, computePageBoxes, currentPageAt, PAGE_GAP, READER_PADDING, type PageRenderState, type ReadMode } from "../render";
 import {
   READER_DEFAULT_MODE_KEY,
   READER_DEFAULT_SCALE_KEY,
   parseDefaultMode,
   parseDefaultScale,
 } from "../settings/reader-prefs";
+import {
+  PERF_IDLE_TEXT_PREFETCH_KEY,
+  PERF_PRELOAD_DOC_MAX_KEY,
+  formatIdleTextPrefetch,
+  nextIdleTextPrefetch,
+  parseIdleTextPrefetch,
+  parsePreloadDocMax,
+} from "../settings/perf-prefs";
 import { useTheme } from "../theme/ThemeProvider";
 import { readerToneClass } from "../theme/theme-prefs";
 import { BookmarkDrawer } from "./BookmarkDrawer";
 import { OutlineDrawer } from "./OutlineDrawer";
 import { mountHighlights } from "./highlight";
-import { searchPages, type DocSearchHit } from "./search/doc-search";
+import { createIndexYield } from "./index-yield";
+import { findInPage, snippetAt, type DocSearchHit } from "./search/doc-search";
 import { mountTextLayer } from "./text-layer";
 import {
   MAX_SCALE,
@@ -78,6 +87,12 @@ function errorText(code: string | null): string {
 
 export function ReaderView({ documentId, onExit, onProgress, onApiReady }: ReaderViewProps): ReactElement {
   const scheduler = useMemo(() => createRenderScheduler(), []);
+  /// 阅读期间让位给前台：连续交互暂停后台索引，空闲后恢复（P2-2，docs/08 §10）。
+  const indexYield = useMemo(() => createIndexYield(), []);
+  /// 空闲文本预取的页数（0 = 关闭，默认）。位图预取不在本轮范围内（docs/20 §5）。
+  const [idleTextPages, setIdleTextPages] = useState(0);
+  /// (待补充) 文档常驻预加载的本数上限：产品参数未定，parse 恒为 0，只做占位。
+  const [preloadDocMax, setPreloadDocMax] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [doc, setDoc] = useState<DocumentHandle | null>(null);
   const [geos, setGeos] = useState<PageGeometry[]>([]);
@@ -112,6 +127,9 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   /// 从 progress_get 恢复的页码：等几何补齐到该页后再跳。
   const [resumePage, setResumePage] = useState<number | null>(null);
   const resumeApplied = useRef(false);
+
+  /// 页盒子只随「几何 / 缩放」变化重算一次：滚动路径上复用同一份（P0-2）。
+  const pageBoxes = useMemo(() => (geos.length === 0 ? [] : computePageBoxes(geos, scale)), [geos, scale]);
 
   // 打开文档：首屏优先（只等第 1 页几何），其余分批补齐
   useEffect(() => {
@@ -221,41 +239,87 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
 
   useEffect(() => () => scheduler.dispose(), [scheduler]);
 
-  // 视口发布：几何可能还没补全，用当前已知的部分
+  // 性能设置（v0.2）：空闲文本预取默认关闭；文档常驻预加载 (待补充) 恒为 0。
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [{ call }, { CMD }] = await Promise.all([import("../core/ipc"), import("../contracts/cmd")]);
+        const all = await call(CMD.SETTINGS_GET_ALL, {});
+        setIdleTextPages(parseIdleTextPrefetch(all[PERF_IDLE_TEXT_PREFETCH_KEY]));
+        setPreloadDocMax(parsePreloadDocMax(all[PERF_PRELOAD_DOC_MAX_KEY]));
+      } catch {
+        // 读不到设置就用内置默认（空闲预取关闭）。
+      }
+    })();
+  }, []);
+
+  const persistIdleTextPrefetch = useCallback((pages: number) => {
+    setIdleTextPages(pages);
+    void Promise.all([import("../core/ipc"), import("../contracts/cmd")])
+      .then(([{ call }, { CMD }]) => call(CMD.SETTINGS_SET, { key: PERF_IDLE_TEXT_PREFETCH_KEY, value: String(pages) }))
+      .catch(() => undefined);
+  }, []);
+
+  // 空闲文本预取（P2-1）：windowPages = 0 时预取器完全惰性，不排任何空闲回调。
+  const idlePrefetcher = useMemo(
+    () => createIdleTextPrefetcher(scheduler, { windowPages: idleTextPages }),
+    [scheduler, idleTextPages],
+  );
+  useEffect(() => () => idlePrefetcher.dispose(), [idlePrefetcher]);
+
+  useEffect(() => {
+    if (doc === null || idleTextPages === 0) return;
+    idlePrefetcher.schedule(currentPage, doc.pageCount);
+    return () => idlePrefetcher.cancel();
+  }, [currentPage, doc, idlePrefetcher, idleTextPages]);
+
+  // 离开阅读器必须把索引恢复回去（P2-2）。
+  useEffect(() => () => indexYield.dispose(), [indexYield]);
+
+  // 视口发布 + 当前页：滚动只记位置，计算与调度合并到下一帧（docs/08 §8）。
+  // 旧实现每个 scroll 事件都直接 setViewport + 重算当前页：60Hz 滚动 = 每秒 60 次
+  // O(页数) 的盒子重算 + 60 次全量状态 Map 拷贝，滚动的大头开销就在这里。
   useEffect(() => {
     const scroll = scrollRef.current;
     if (doc === null || scroll === null || geos.length === 0) return;
-    const publish = () => {
+    let raf = 0;
+    const flush = (): void => {
+      raf = 0;
+      const el = scrollRef.current;
+      if (el === null) return;
       scheduler.setViewport({
         mode,
         scale,
-        scrollTop: scroll.scrollTop,
-        viewportHeight: scroll.clientHeight,
-        viewportWidth: scroll.clientWidth,
+        scrollTop: el.scrollTop,
+        viewportHeight: el.clientHeight,
+        viewportWidth: el.clientWidth,
         pageGeometries: geos,
       });
+      // 单页模式的页码由 currentPage 决定，不能由滚动位置反推（容器里只有一页）。
+      if (mode !== "single") {
+        const next = currentPageAt(pageBoxes, el.scrollTop, el.clientHeight);
+        setCurrentPage((prev) => (prev === next ? prev : next));
+      }
     };
-    publish();
-    scroll.addEventListener("scroll", publish, { passive: true });
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(publish);
-    observer?.observe(scroll);
-    window.addEventListener("resize", publish);
-    return () => {
-      scroll.removeEventListener("scroll", publish);
-      observer?.disconnect();
-      window.removeEventListener("resize", publish);
+    const schedule = (): void => {
+      if (raf === 0) raf = window.requestAnimationFrame(flush);
     };
-  }, [doc, geos, mode, scale, scheduler]);
-
-  useEffect(() => {
-    const scroll = scrollRef.current;
-    // 单页模式的页码由 currentPage 决定，不能由滚动位置反推（容器里只有一页）。
-    if (scroll === null || geos.length === 0 || mode === "single") return;
-    const onScroll = () => setCurrentPage(currentPageAt(computePageBoxes(geos, scale), scroll.scrollTop, scroll.clientHeight));
-    onScroll();
+    const onScroll = (): void => {
+      indexYield.notifyInteraction();
+      schedule();
+    };
+    flush();
     scroll.addEventListener("scroll", onScroll, { passive: true });
-    return () => scroll.removeEventListener("scroll", onScroll);
-  }, [geos, scale, mode]);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    observer?.observe(scroll);
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (raf !== 0) window.cancelAnimationFrame(raf);
+      scroll.removeEventListener("scroll", onScroll);
+      observer?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [doc, geos, indexYield, mode, pageBoxes, scale, scheduler]);
 
   // 缩放锚点：保持当前页顶部仍在视口顶部（否则一缩放就跳回开头）。
   const prevScale = useRef(scale);
@@ -275,9 +339,9 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     if (before === mode || mode !== "continuous") return;
     const scroll = scrollRef.current;
     if (scroll === null || geos.length === 0) return;
-    const box = computePageBoxes(geos, scale)[currentPage - 1];
+    const box = pageBoxes[currentPage - 1];
     if (box !== undefined) scroll.scrollTop = box.top + READER_PADDING;
-  }, [mode, geos, scale, currentPage]);
+  }, [mode, geos.length, pageBoxes, currentPage]);
 
   useEffect(() => {
     if (doc === null) return;
@@ -307,10 +371,10 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
         return;
       }
       if (geos.length === 0) return;
-      const box = computePageBoxes(geos, scale)[target - 1];
+      const box = pageBoxes[target - 1];
       if (box !== undefined) scroll.scrollTop = box.top + READER_PADDING;
     },
-    [doc, geos, scale, mode],
+    [doc, geos.length, mode, pageBoxes],
   );
 
 
@@ -412,7 +476,9 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     setMenuOpen(false);
   }, [goToPage, jumpInput]);
 
-  /// 文内搜索：逐页取文本（有缓存），命中聚合；结果跳到对应页并高亮。
+  /// 文内搜索：逐页取文本并即时匹配。
+  /// 文本统一走 scheduler.getTextContent（P0-3）：与渲染/文本层共用同一份字节预算 LRU，
+  /// 第二次同样的搜索不再重新解析；也不再一次性把整本 300 页文本攒进数组。
   /// 可取消：切文档 / 关面板后，旧一轮的结果不再写回 state。
   const searchRun = useRef(0);
   const runSearch = useCallback(
@@ -425,24 +491,26 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
       }
       setSearching(true);
       try {
-        const collected: { pageNo: number; content: TextContentHandle }[] = [];
+        const found: DocSearchHit[] = [];
         for (let p = 1; p <= doc.pageCount; p += 1) {
           if (searchRun.current !== runId) return;
-          const page = await doc.getPage(p);
-          collected.push({ pageNo: p, content: await page.getTextContent() });
+          const content = await scheduler.getTextContent(p);
+          const ranges = findInPage(content.text, raw);
+          const first = ranges[0];
+          if (first === undefined) continue;
+          found.push({ pageNo: p, ranges, snippet: snippetAt(content.text, first[0], first[1]) });
         }
         if (searchRun.current !== runId) return;
-        const found = searchPages(collected, raw);
         setHits(found);
         activeHitRef.current = 0;
         setActiveHit(0);
-        const first = found[0];
-        if (first !== undefined) goToPage(first.pageNo);
+        const hit = found[0];
+        if (hit !== undefined) goToPage(hit.pageNo);
       } finally {
         if (searchRun.current === runId) setSearching(false);
       }
     },
-    [doc, goToPage],
+    [doc, goToPage, scheduler],
   );
 
   const closeSearch = useCallback(() => {
@@ -474,6 +542,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   // 键盘：Ctrl+F 文内搜索，Ctrl± 缩放，翻页/模式/退出
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      indexYield.notifyInteraction();
       const target = e.target as HTMLElement | null;
       const typing = target !== null && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
       if (e.ctrlKey || e.metaKey) {
@@ -521,7 +590,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [applyScale, bookmarksOpen, closeSearch, currentPage, goToPage, menuOpen, onExit, outline.length, outlineOpen, searchOpen, toggleFullscreen]);
+  }, [applyScale, bookmarksOpen, closeSearch, currentPage, goToPage, indexYield, menuOpen, onExit, outline.length, outlineOpen, searchOpen, toggleFullscreen]);
 
   // 阅读页的右键 = 呼出本页的功能面板，而不是 WebView 自带的「重新加载/另存为/检查」。
   //
@@ -558,13 +627,14 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     const host = scrollRef.current;
     if (host === null) return;
     const onWheel = (event: WheelEvent): void => {
+      indexYield.notifyInteraction();
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       applyScale(scaleFromWheel(scaleRef.current, event.deltaY, event.deltaMode));
     };
     host.addEventListener("wheel", onWheel, { passive: false });
     return () => host.removeEventListener("wheel", onWheel);
-  }, [applyScale]);
+  }, [applyScale, indexYield]);
 
   // 放大后没有抓手只能拖滚动条：中键（滚轮键）按住拖动即可平移页面。
   // 为什么不用左键拖动：会抢走文本选择；为什么不用空格+左键：空格已经承担翻页。
@@ -628,6 +698,9 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   }, [menuOpen]);
 
   const getSelectionText = useCallback(() => window.getSelection()?.toString() ?? "", []);
+
+  /// 文本层与搜索都从这里取文本：缓存所有权在调度器，组件不再自己碰 pdf.js。
+  const requestText = useCallback((pageNo: number) => scheduler.getTextContent(pageNo), [scheduler]);
 
   useEffect(() => {
     onApiReady?.({ mode, scale, currentPage, pageCount: doc?.pageCount ?? 0, setMode, setScale, goToPage, getSelectionText });
@@ -722,7 +795,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
           return (
             <PageSlot
               key={pageNo}
-              doc={doc}
+              requestText={requestText}
               pageNo={pageNo}
               geometry={geo}
               scale={scale}
@@ -836,6 +909,26 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
             type="button"
             role="menuitem"
             className="lg-reader-menu-item"
+            title="空闲时向前预取文本，让搜索更快（默认关闭）"
+            onClick={() => persistIdleTextPrefetch(nextIdleTextPrefetch(idleTextPages))}
+          >
+            空闲预取文本
+            <kbd>{formatIdleTextPrefetch(idleTextPages)}</kbd>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="lg-reader-menu-item"
+            disabled
+            title="(待补充) 产品参数未定：常驻几本 / 内存上限"
+          >
+            预加载下一篇
+            <kbd>{preloadDocMax <= 0 ? "未启用" : preloadDocMax + " 篇"}</kbd>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="lg-reader-menu-item"
             title="在本文中搜索（Ctrl+F）"
             onClick={() => {
               setSearchOpen(true);
@@ -917,7 +1010,6 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
 }
 
 interface PageSlotProps {
-  doc: DocumentHandle | null;
   pageNo: number;
   geometry: PageGeometry;
   scale: number;
@@ -925,10 +1017,21 @@ interface PageSlotProps {
   highlights: [number, number][];
   /// 是否挂文本层：只给当前页附近，避免一次打开发起 N 次 getTextContent（性能关键）。
   mountText: boolean;
+  /// 取页文本：走调度器的共享缓存（P0-3），组件不再直接调用引擎。
+  requestText: (pageNo: number) => Promise<TextContentHandle>;
   onRetry: () => void;
 }
 
-function PageSlot({ doc, pageNo, geometry, scale, state, highlights, mountText, onRetry }: PageSlotProps): ReactElement {
+function PageSlot({
+  pageNo,
+  geometry,
+  scale,
+  state,
+  highlights,
+  mountText,
+  requestText,
+  onRetry,
+}: PageSlotProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const textRef = useRef<{ destroy: () => void } | null>(null);
   const highlightRef = useRef<(() => void) | null>(null);
@@ -938,7 +1041,7 @@ function PageSlot({ doc, pageNo, geometry, scale, state, highlights, mountText, 
 
   useEffect(() => {
     const host = hostRef.current;
-    if (host === null || doc === null) return;
+    if (host === null) return;
     if (!mountText) {
       // 远离当前页：卸掉文本层，释放 DOM 与文本内容
       textRef.current?.destroy();
@@ -949,8 +1052,7 @@ function PageSlot({ doc, pageNo, geometry, scale, state, highlights, mountText, 
     let cancelled = false;
     void (async () => {
       try {
-        const page = await doc.getPage(pageNo);
-        const content = state?.textContent ?? (await page.getTextContent());
+        const content = state?.textContent ?? (await requestText(pageNo));
         if (cancelled) return;
         // 图片扫描页没有文字：不挂空白文本层，避免出现无意义的选择区域（16 §2）。
         if (content.items.length === 0) {
@@ -971,7 +1073,7 @@ function PageSlot({ doc, pageNo, geometry, scale, state, highlights, mountText, 
       textRef.current?.destroy();
       textRef.current = null;
     };
-  }, [doc, pageNo, scale, geometry.heightPt, state?.textContent, mountText]);
+  }, [pageNo, requestText, scale, geometry.heightPt, state?.textContent, mountText]);
 
   // 高亮：当前命中页的命中区间
   useEffect(() => {

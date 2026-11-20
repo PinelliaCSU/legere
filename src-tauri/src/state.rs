@@ -17,6 +17,8 @@ pub struct AppState {
     pub watchers: Mutex<Vec<notify::RecommendedWatcher>>,
     /// 索引任务调度器（M10）。
     pub index: std::sync::Arc<crate::jobs::IndexService>,
+    /// pdf:// 的句柄 + 最近段缓存（P1-2）：有界，指纹（size+mtime）不符即重开。
+    pub pdf_cache: crate::protocol::cache::DocCache,
 }
 
 impl AppState {
@@ -27,6 +29,7 @@ impl AppState {
             db_error: Mutex::new(None),
             watchers: Mutex::new(Vec::new()),
             index: std::sync::Arc::new(crate::jobs::IndexService::new()),
+            pdf_cache: crate::protocol::cache::DocCache::new(),
         }
     }
 

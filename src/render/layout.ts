@@ -101,7 +101,64 @@ export function expandForPrefetch(
   };
 }
 
-/// 优先级：距视口中心越近越小（越先渲染）。
+/// 跳页保护阈值（docs/08 §2 第 53 行）：可见跨度超过它的一轮只渲染 visible、跳过预取。
+/// goToPage 或极小窗口会让 visible ∪ prefetch 瞬间变成一大片，一次全排队只会把队列撑爆。
+export const JUMP_SPAN_LIMIT = 30;
+
+export function shouldSkipPrefetch(range: { first: number; last: number }): boolean {
+  return range.last - range.first > JUMP_SPAN_LIMIT;
+}
+
+/// 优先级权重（docs/08 §3 第 65-71 行的表）。改这里必须同步文档与该表的算例，
+/// 单测只断言排序结果（priority.test.ts），不断言分数绝对值。
+export const PRIORITY_WEIGHTS = {
+  distance: 1.0,
+  direction: 0.5,
+  current: 0.8,
+  scaleMiss: 2.0,
+} as const;
+
+/// 无缓存时的最大缩放失配（等价 log2(8)）。
+export const SCALE_MISS_MAX = 3;
+
+/// 预取页的固定层级偏移：可见页永远排在预取页之前（0..~10 vs 1000+）。
+export const PREFETCH_TIER = 1000;
+
+/// 打分上下文：docs/08 §3 的 w1·d − w2·dir − w3·cur + w4·miss 四个输入。
+export interface PriorityContext {
+  range: { first: number; last: number };
+  scrollTop: number;
+  viewportHeight: number;
+  currentPage: number;
+  /// 滚动方向：1=向下、-1=向上、0=静止/未知（缩放与换文档时归零）。
+  scrollSign: -1 | 0 | 1;
+  scale: number;
+  /// 该页已缓存位图的 scale（无缓存返回 null）。
+  cachedScaleOf: (pageNo: number) => number | null;
+}
+
+/// 单页调度分数：越小越先渲染。可见页返回 0..10 量级，预取页统一加 PREFETCH_TIER。
+export function pageScore(box: PageBox, ctx: PriorityContext): number {
+  const viewCenter = ctx.scrollTop + ctx.viewportHeight / 2;
+  const center = box.top + box.height / 2;
+  const viewportHeight = ctx.viewportHeight > 0 ? ctx.viewportHeight : 1;
+  const distance = Math.abs(center - viewCenter) / viewportHeight;
+  // 在滚动方向前方：半页提前量，让下一屏领先同距离的上一屏。
+  const ahead = ctx.scrollSign !== 0 && (center - viewCenter) * ctx.scrollSign > 0 ? 1 : 0;
+  const isCurrent = box.pageNo === ctx.currentPage ? 1 : 0;
+  const cachedScale = ctx.cachedScaleOf(box.pageNo);
+  const scaleMiss = cachedScale === null || cachedScale <= 0 ? SCALE_MISS_MAX : Math.abs(Math.log2(cachedScale / ctx.scale));
+  const score =
+    PRIORITY_WEIGHTS.distance * distance -
+    PRIORITY_WEIGHTS.direction * ahead -
+    PRIORITY_WEIGHTS.current * isCurrent +
+    PRIORITY_WEIGHTS.scaleMiss * scaleMiss;
+  const inVisible = box.pageNo >= ctx.range.first && box.pageNo <= ctx.range.last;
+  return inVisible ? score : PREFETCH_TIER + score;
+}
+
+/// 旧的三档排序（v0.11 及以前）。保留给外部调用与既有单测，调度器已改用 pageScore。
+/// @deprecated 用 pageScore（含滚动方向偏好与缩放失配，docs/08 §3）。
 export function pagePriority(
   pageNo: number,
   range: { first: number; last: number },

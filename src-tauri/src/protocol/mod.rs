@@ -2,6 +2,7 @@
 // Windows 上自定义 scheme 通常会变成 http://pdf.localhost/...，因此路由解析必须同时接受
 // 两种前缀，而不是假设一种。文档不全时以探针实测的 req.uri() 为准，并回填 docs/02 §1。
 
+pub mod cache;
 pub mod range;
 
 pub use range::{parse_range, RangeOutcome, RANGE_MAX_BYTES};

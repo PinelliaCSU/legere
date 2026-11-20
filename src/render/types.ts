@@ -48,4 +48,16 @@ export interface RenderScheduler {
   retry(pageNo: number): void;
   subscribe(cb: (states: ReadonlyMap<number, PageRenderState>) => void): () => void;
   dispose(): void;
+  /// 取某页文本（v0.2 增补，docs/05 §7 修订）：渲染、文本层、文内搜索共用同一份
+  /// 字节预算 LRU 与在途去重，调用方不得再自己走 getPage + getTextContent。
+  getTextContent(pageNo: number): Promise<TextContentHandle>;
+  /// 批量预热文本（搜索扫描、空闲预取用）。并发受限，单页失败不抛出。
+  prefetchText(pageNos: number[], opts?: TextPrefetchOptions): Promise<void>;
+}
+
+export interface TextPrefetchOptions {
+  /// 并发上限，夹取到 [1, 4]。
+  concurrency?: number;
+  /// 返回 false 时尽快停下（切文档、关面板、用户继续滚动）。
+  shouldContinue?: () => boolean;
 }
