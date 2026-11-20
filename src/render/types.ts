@@ -48,7 +48,11 @@ export interface RenderScheduler {
   retry(pageNo: number): void;
   subscribe(cb: (states: ReadonlyMap<number, PageRenderState>) => void): () => void;
   dispose(): void;
+<<<<<<< HEAD
   /// 取某页文本（v0.13 增补，docs/05 §7 修订）：渲染、文本层、文内搜索共用同一份
+=======
+  /// 取某页文本（v0.2 增补，docs/05 §7 修订）：渲染、文本层、文内搜索共用同一份
+>>>>>>> fd010f8aa2c88c31f8dd15affbb12730a8b0aa12
   /// 字节预算 LRU 与在途去重，调用方不得再自己走 getPage + getTextContent。
   getTextContent(pageNo: number): Promise<TextContentHandle>;
   /// 批量预热文本（搜索扫描、空闲预取用）。并发受限，单页失败不抛出。

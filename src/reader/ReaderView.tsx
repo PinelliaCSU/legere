@@ -239,7 +239,11 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
 
   useEffect(() => () => scheduler.dispose(), [scheduler]);
 
+<<<<<<< HEAD
   // 性能设置（v0.13）：空闲文本预取默认关闭；文档常驻预加载 (待补充) 恒为 0。
+=======
+  // 性能设置（v0.2）：空闲文本预取默认关闭；文档常驻预加载 (待补充) 恒为 0。
+>>>>>>> fd010f8aa2c88c31f8dd15affbb12730a8b0aa12
   useEffect(() => {
     void (async () => {
       try {

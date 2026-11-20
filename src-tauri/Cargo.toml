@@ -1,6 +1,10 @@
 [package]
 name = "legere"
+<<<<<<< HEAD
 version = "0.13.0"
+=======
+version = "0.2.0"
+>>>>>>> fd010f8aa2c88c31f8dd15affbb12730a8b0aa12
 description = "Legere — 个人 PDF 文献库阅读器"
 edition = "2021"
 rust-version = "1.77"
