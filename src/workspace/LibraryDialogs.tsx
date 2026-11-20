@@ -8,7 +8,12 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 import { CMD } from "../contracts/cmd";
 import type { LibraryRootDto } from "../contracts/types";
 import { call } from "../core/ipc";
-import { normalizeRootName, normalizeRootPathInput, rootLabel, rootNameError, rootReplaceBody } from "./library-roots";
+import { normalizeRootName, rootLabel, rootNameError, rootReplaceBody } from "./library-roots";
+
+/// 系统文件夹选择窗口的等待上限：用户在窗口里挑多久都要等（IPC 默认 15s 会直接判超时）。
+const PICK_FOLDER_TIMEOUT_MS = 300_000;
+/// 同步扫描（library_scan_now）要扫完才返回，大库可能扫很久。
+const SCAN_TIMEOUT_MS = 120_000;
 
 interface RootDialogProps {
   root: LibraryRootDto;
@@ -85,23 +90,48 @@ export function RootRenameDialog({ root, onClose, onDone }: RootDialogProps): Re
 }
 
 /// 替换：把库根指向新文件夹。旧文档记录由后端在同一事务里删除（R23）。
+/// 新文件夹只能由系统文件管理器窗口给出；选中后只读展示，不给手输框
+/// （文件管理器返回的就是绝对路径，省掉「反斜杠转义 + 打错路径」两类问题）。
 export function RootReplaceDialog({ root, onClose, onDone }: RootDialogProps): ReactElement {
-  const [path, setPath] = useState("");
+  const [path, setPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  useEffect(() => inputRef.current?.focus(), []);
 
-  const submit = useCallback(async () => {
-    const value = normalizeRootPathInput(path);
-    if (value === null || busy) return;
+  const pickFolder = useCallback(async () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      const replaced = await call(CMD.LIBRARY_ROOT_REPLACE, { id: root.id, path: value }, { timeoutMs: 60_000 });
-      onDone("已替换文献库，正在扫描新文件夹");
-      // 扫描与「添加文献库」同一条路径：命令只改库根，扫描单独发起。
-      await call(CMD.LIBRARY_SCAN_START, { rootId: replaced.id }).catch(() => undefined);
+      const picked = await call(CMD.LIBRARY_PICK_FOLDER, {}, { timeoutMs: PICK_FOLDER_TIMEOUT_MS });
+      // 取消 = 保持原样：之前选过的路径不清空，也不改文案。
+      if (picked !== null) setPath(picked);
+    } catch (err) {
+      const e = err as { code?: string; detail?: string };
+      setError((e.code ?? "E_INTERNAL") + (e.detail ? " — " + e.detail : ""));
+    } finally {
+      setBusy(false);
+    }
+  }, [busy]);
+
+  const submit = useCallback(async () => {
+    if (path === null || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const replaced = await call(CMD.LIBRARY_ROOT_REPLACE, { id: root.id, path }, { timeoutMs: 60_000 });
+      // 同步扫描：替换后回去刷新必须有确定的「已扫完」时刻，
+      // 否则后台扫描与列表读取抢跑，界面上就是「替换了却还是空的」（原 LIBRARY_SCAN_START 的问题）。
+      //
+      // 库根此时已经换成新路径了：扫描再失败也不能把对话框留在「替换失败」的样子上忽悠用户，
+      // 所以这里吞掉扫描错误，只把「可以点刷新重试」写进提示。
+      const outcome = await call(CMD.LIBRARY_SCAN_NOW, { rootId: replaced.id }, { timeoutMs: SCAN_TIMEOUT_MS }).catch(
+        () => null,
+      );
+      onDone(
+        outcome === null
+          ? "已替换文献库：新文件夹扫描未完成，可点【刷新】重试"
+          : "已替换文献库：扫描到 " + (outcome.added + outcome.revived) + " 本文献",
+      );
     } catch (err) {
       const e = err as { code?: string; detail?: string };
       setError((e.code ?? "E_INTERNAL") + (e.detail ? " — " + e.detail : ""));
@@ -112,26 +142,24 @@ export function RootReplaceDialog({ root, onClose, onDone }: RootDialogProps): R
 
   return (
     <div className="lg-overlay" role="dialog" aria-modal="true" aria-label="替换文献库">
-      <div className="lg-overlay-panel lg-dialog">
+      <div
+        className="lg-overlay-panel lg-dialog"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
+      >
         <h2 className="lg-dialog-title">替换文献库</h2>
         <p className="lg-dialog-body">{rootReplaceBody(rootLabel(root))}</p>
-        <label className="lg-field">
-          <span className="lg-field-label">新文件夹的绝对路径</span>
-          <input
-            ref={inputRef}
-            className="lg-field-input"
-            value={path}
-            placeholder="例如 D:\Papers"
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void submit();
-              if (e.key === "Escape") onClose();
-            }}
-          />
-        </label>
+        <div className="lg-field">
+          <span className="lg-field-label">新文件夹</span>
+          <p className="lg-dialog-sub lg-muted">{path ?? "还没有选择文件夹"}</p>
+          <button type="button" autoFocus className="lg-btn" disabled={busy} onClick={() => void pickFolder()}>
+            选择文件夹…
+          </button>
+        </div>
         {error !== null ? <p className="lg-dialog-error">{error}</p> : null}
         <div className="lg-dialog-actions">
-          <button type="button" className="lg-btn lg-btn-primary" disabled={busy || normalizeRootPathInput(path) === null} onClick={() => void submit()}>
+          <button type="button" className="lg-btn lg-btn-primary" disabled={busy || path === null} onClick={() => void submit()}>
             替换
           </button>
           <button type="button" className="lg-btn" onClick={onClose}>

@@ -161,3 +161,12 @@ export interface ScanStartedDto {
   started: boolean;
   reason?: string;
 }
+
+/// 同步扫描（library_scan_now）的计数结果，字段与 Rust 的 ScanOutcomeDto 一一对应。
+export interface ScanOutcomeDto {
+  scanned: number;
+  added: number;
+  updated: number;
+  revived: number;
+  removed: number;
+}

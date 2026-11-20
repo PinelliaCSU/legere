@@ -330,6 +330,8 @@ pub fn run() {
             commands::library::library_root_add,
             commands::library::library_root_remove,
             commands::library::library_scan_start,
+            commands::library::library_scan_now,
+            commands::library::library_pick_folder,
             commands::library::document_list,
             commands::library::document_recent,
             commands::library::document_get,

@@ -31,6 +31,7 @@ import {
 import { useTheme } from "../theme/ThemeProvider";
 import { readerToneClass } from "../theme/theme-prefs";
 import { BookmarkDrawer } from "./BookmarkDrawer";
+import { OutlineDrawer } from "./OutlineDrawer";
 import { mountHighlights } from "./highlight";
 import { searchPages, type DocSearchHit } from "./search/doc-search";
 import { mountTextLayer } from "./text-layer";
@@ -900,27 +901,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
       ) : null}
 
       {outlineOpen && outline.length > 0 ? (
-        <aside className="lg-drawer lg-outline" aria-label="目录">
-          <header className="lg-drawer-head">
-            <strong>目录</strong>
-            <button type="button" className="lg-btn" onClick={() => setOutlineOpen(false)}>关闭</button>
-          </header>
-          <ul className="lg-drawer-list">
-            {outline.map((node, i) => (
-              <li key={i}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (node.pageNo !== null) goToPage(node.pageNo);
-                  }}
-                >
-                  {node.title}
-                  {node.pageNo !== null ? " · p" + node.pageNo : ""}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
+        <OutlineDrawer outline={outline} onJump={(pageNo) => goToPage(pageNo)} onClose={() => setOutlineOpen(false)} />
       ) : null}
 
       {bookmarksOpen ? (

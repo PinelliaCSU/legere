@@ -50,6 +50,10 @@ const ALL_DOCS_PAGE = 200;
 const ALL_DOCS_MAX = 2000;
 /// 单屏列表渲染上限：几千行 DOM 会拖慢滚动，超出部分提示用文件夹/过滤词收窄。
 const LIBRARY_LIST_CAP = 500;
+/// 系统文件夹选择窗口的等待上限：用户在窗口里挑多久都要等（IPC 默认 15s 会直接判超时）。
+const PICK_FOLDER_TIMEOUT_MS = 300_000;
+/// 同步扫描（library_scan_now）要扫完才返回，大库可能扫很久。
+const SCAN_TIMEOUT_MS = 120_000;
 
 function toHomeBook(doc: DocumentDto): HomeBook {
   return {
@@ -84,8 +88,6 @@ export function AppShell(): ReactElement {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<{ documentId: number; title: string; hits: DocSearchHit[] }[]>([]);
   const [ready, setReady] = useState(false);
-  const [addOpen, setAddOpen] = useState(false);
-  const [addPath, setAddPath] = useState("");
   const [busy, setBusy] = useState("");
   const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null);
   /// 文献库过滤词：走后端 document_list（按文件名/标题 LIKE），不是前端假过滤。
@@ -352,26 +354,53 @@ export function AppShell(): ReactElement {
   }, [libraryDocs]);
   const nowForLastRead = useMemo(() => new Date(), [lastRead]);
 
-  // 注意：WebView2 不支持 window.prompt，必须用应用内输入框（否则按钮点了没反应）。
-  const onAddLibrary = useCallback(async (rawPath: string) => {
-    const path = rawPath.trim();
-    if (path.length === 0) return;
+  /// 刷新 = 真刷新：先同步扫描磁盘（library_scan_now 扫完才返回），再重读列表/库根。
+  /// 顺序不能反：先读后扫读到的是扫描前的旧数据——「磁盘上新增/删掉 PDF，刷新却看不到」就是这么来的。
+  const refreshFromDisk = useCallback(async () => {
     try {
+      setBusy("扫描中…");
+      const outcome = await call(CMD.LIBRARY_SCAN_NOW, {}, { timeoutMs: SCAN_TIMEOUT_MS });
+      await refresh();
+      const added = outcome.added + outcome.revived;
+      if (added + outcome.updated + outcome.removed === 0) {
+        setStatus("已扫描 " + outcome.scanned + " 份文件，没有变化");
+        return;
+      }
+      setStatus(
+        "已扫描 " + outcome.scanned + " 份文件：新增 " + added + " 本，移除 " + outcome.removed + " 本" +
+          (outcome.updated > 0 ? "，更新 " + outcome.updated + " 本" : ""),
+      );
+    } catch (err) {
+      const e = err as { code?: string; detail?: string };
+      setStatus("刷新失败：" + (e.code ?? "E_INTERNAL") + (e.detail ? " — " + e.detail : ""));
+    } finally {
+      setBusy("");
+    }
+  }, [refresh]);
+
+  /// 添加文献库：路径只由系统文件管理器窗口给出（WebView2 没有可用的目录选择器，
+  /// 手输绝对路径既容易打错，也会被反斜杠转义坑到）。
+  const addLibrary = useCallback(async () => {
+    try {
+      setBusy("选择文件夹…");
+      const picked = await call(CMD.LIBRARY_PICK_FOLDER, {}, { timeoutMs: PICK_FOLDER_TIMEOUT_MS });
+      // 用户取消：什么都不做（不建库根、不动状态栏文案）。
+      if (picked === null) return;
       setBusy("添加文献库…");
-      const root = await call(CMD.LIBRARY_ROOT_ADD, { path });
+      const root = await call(CMD.LIBRARY_ROOT_ADD, { path: picked });
       setStatus("已添加文献库：" + root.displayName);
       setBusy("扫描中…");
-      await call(CMD.LIBRARY_SCAN_START, { rootId: root.id });
-      // 扫描是后台任务：等一会儿再刷新，并把新文档送进索引队列（否则搜不到）。
-      await new Promise((r) => setTimeout(r, 2000));
+      // 同步扫描：拿到确定的完成时刻与计数，不再靠 sleep 猜（原来那个 2s 猜测等待已删）。
+      const outcome = await call(CMD.LIBRARY_SCAN_NOW, { rootId: root.id }, { timeoutMs: SCAN_TIMEOUT_MS });
       const docs = await call(CMD.DOCUMENT_RECENT, { limit: 200 });
       setBusy("建立索引…");
+      // 索引入队沿用既有做法（扫描后逐个 enqueue），不新增批量命令。
       for (const doc of docs) {
         await call(CMD.INDEX_ENQUEUE, { documentId: doc.id, priority: 0 }).catch(() => undefined);
       }
-      setStatus("已加入 " + docs.length + " 本文献，正在后台索引（搜索需要索引完成）");
-      setAddOpen(false);
-      setAddPath("");
+      setStatus(
+        "已加入 " + (outcome.added + outcome.revived) + " 本文献（" + docs.length + " 本在后台索引，搜索需要索引完成）",
+      );
       await refresh();
     } catch (err) {
       const e = err as { code?: string; detail?: string; message?: string };
@@ -433,34 +462,13 @@ export function AppShell(): ReactElement {
         </header>
       ) : null}
 
-      {addOpen ? (
-        <div className="lg-addbar">
-          <input
-            autoFocus
-            placeholder="粘贴文献库文件夹的绝对路径，例如 D:\Papers"
-            value={addPath}
-            onChange={(e) => setAddPath(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void onAddLibrary(addPath);
-              if (e.key === "Escape") setAddOpen(false);
-            }}
-          />
-          <button type="button" className="lg-btn lg-btn-primary" onClick={() => void onAddLibrary(addPath)}>
-            添加并扫描
-          </button>
-          <button type="button" className="lg-btn" onClick={() => setAddOpen(false)}>
-            取消
-          </button>
-        </div>
-      ) : null}
-
       <main className="lg-main">
         {/* 主页常驻挂载：返回时不重置环位置与焦点书（13 §6），active 负责停掉按键/滚轮。 */}
         <HomeSpace
           books={books}
           active={route === "home"}
           onOpenBook={openBook}
-          onAddLibrary={() => setAddOpen(true)}
+          onAddLibrary={() => void addLibrary()}
         />
 
         {/* 需求 5：上次阅读版块。只在主页显示，且不参与转盘几何。 */}
@@ -471,9 +479,9 @@ export function AppShell(): ReactElement {
         {route === "library" ? (
           <section className="lg-library">
             <div className="lg-library-toolbar">
-              <button type="button" className="lg-btn" onClick={() => setAddOpen(true)}>添加文献库</button>
+              <button type="button" className="lg-btn" onClick={() => void addLibrary()} disabled={busy !== ""}>添加文献库</button>
               <button type="button" className="lg-btn" onClick={() => void reindexAll()} disabled={busy !== ""}>重建索引</button>
-              <button type="button" className="lg-btn" onClick={() => void refresh()}>刷新</button>
+              <button type="button" className="lg-btn" onClick={() => void refreshFromDisk()} disabled={busy !== ""}>刷新</button>
               <input
                 className="lg-filter"
                 type="search"

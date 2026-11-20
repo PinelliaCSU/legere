@@ -263,4 +263,15 @@ pub struct ScanStartedDto {
     pub reason: Option<String>,
 }
 
+/// 同步扫描的计数结果（library_scan_now）。字段与 ScanOutcome 一一对应。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanOutcomeDto {
+    pub scanned: i64,
+    pub added: i64,
+    pub updated: i64,
+    pub revived: i64,
+    pub removed: i64,
+}
+
 pub type SettingsMapDto = BTreeMap<String, String>;

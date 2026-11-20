@@ -96,15 +96,6 @@ pub fn start_watcher(app: AppHandle, root_id: i64, root_path: PathBuf) -> Option
                 let changed = debouncer.take();
                 tracing::info!(root_id, files = changed.len(), "监控触发增量扫描");
 
-                let _ = app.emit(
-                    E_LIBRARY_CHANGED,
-                    LibraryChangedEvent {
-                        kinds: vec![LibraryChangeKind::Updated],
-                        document_ids: Vec::new(),
-                        root_id: Some(root_id),
-                    },
-                );
-
                 let state = app.state::<AppState>();
                 match state.with_db(|db| scan_root(db, root_id, &root_path)) {
                     Ok(outcome) => {
@@ -115,6 +106,28 @@ pub fn start_watcher(app: AppHandle, root_id: i64, root_path: PathBuf) -> Option
                             removed = outcome.removed,
                             "监控扫描完成"
                         );
+                        // 先扫描、再发 changed：changed 一到前端就会重读列表，
+                        // 先发后扫会让前端读到扫描前的旧数据（增删都看不到），这是竞态根源。
+                        let mut kinds = Vec::new();
+                        if outcome.added + outcome.revived > 0 {
+                            kinds.push(LibraryChangeKind::Added);
+                        }
+                        if outcome.updated > 0 {
+                            kinds.push(LibraryChangeKind::Updated);
+                        }
+                        if outcome.removed > 0 {
+                            kinds.push(LibraryChangeKind::Removed);
+                        }
+                        if !kinds.is_empty() {
+                            let _ = app.emit(
+                                E_LIBRARY_CHANGED,
+                                LibraryChangedEvent {
+                                    kinds,
+                                    document_ids: Vec::new(),
+                                    root_id: Some(root_id),
+                                },
+                            );
+                        }
                         let _ = app.emit(
                             E_LIBRARY_SCAN_PROGRESS,
                             ScanProgressEvent {

@@ -16,6 +16,7 @@ import type {
   PageDto,
   PingDto,
   ProgressDto,
+  ScanOutcomeDto,
   ScanStartedDto,
   SearchCountDto,
   SettingsMapDto,
@@ -31,6 +32,8 @@ export const CMD = {
   LIBRARY_ROOT_UPDATE: "library_root_update",
   LIBRARY_ROOT_REPLACE: "library_root_replace",
   LIBRARY_SCAN_START: "library_scan_start",
+  LIBRARY_SCAN_NOW: "library_scan_now",
+  LIBRARY_PICK_FOLDER: "library_pick_folder",
 
   DOCUMENT_LIST: "document_list",
   DOCUMENT_GET: "document_get",
@@ -74,6 +77,8 @@ export interface CommandMap {
   library_root_update: { args: { id: number; displayName: string }; result: LibraryRootDto };
   library_root_replace: { args: { id: number; path: string }; result: LibraryRootDto };
   library_scan_start: { args: { rootId?: number }; result: ScanStartedDto };
+  library_scan_now: { args: { rootId?: number }; result: ScanOutcomeDto };
+  library_pick_folder: { args: Record<string, never>; result: string | null };
 
   document_list: { args: { query: DocumentQuery }; result: PageDto<DocumentDto> };
   document_get: { args: { id: number }; result: DocumentDetailDto };

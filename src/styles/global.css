@@ -48,16 +48,6 @@ body {
 .lg-main { position: relative; flex: 1; overflow: hidden; width: 100%; min-width: 0; }
 .lg-muted { color: var(--lg-fg-muted); font-size: 12px; }
 
-.lg-addbar {
-  display: flex; gap: 8px; align-items: center;
-  padding: 10px 20px; border-bottom: 1px solid var(--lg-border-subtle);
-  background: var(--lg-bg-surface);
-}
-.lg-addbar input {
-  flex: 1; max-width: 720px; padding: 6px 10px; font-size: 13px;
-  border: 1px solid var(--lg-border-strong); border-radius: 6px;
-  background: var(--lg-bg-app); color: var(--lg-fg-primary);
-}
 .lg-btn {
   padding: 6px 12px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
@@ -341,15 +331,22 @@ body {
   display: block; height: 100%; background: var(--lg-accent); opacity: 0.55;
   transition: width var(--lg-dur-fast) var(--lg-ease);
 }
-/* 抽屉：阅读器没有顶部导航，所以从视口顶端开始。 */
+/* 抽屉：阅读器没有顶部导航，所以从视口顶端开始。
+   抽屉自身不滚动（overflow: hidden），头部固定，只有 .lg-drawer-list 滚 ——
+   否则长目录一滚就把「关闭」滚出视口，得先滚回最上面才能关。 */
 .lg-drawer {
   position: fixed; right: 0; top: 0; bottom: 0; width: 300px; z-index: 60;
   background: var(--lg-bg-elevated); border-left: 1px solid var(--lg-border-subtle);
-  padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: auto;
+  padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden;
 }
 .lg-outline { right: auto; left: 0; width: 288px; border-left: none; border-right: 1px solid var(--lg-border-subtle); }
-.lg-drawer-head { display: flex; align-items: center; justify-content: space-between; }
-.lg-drawer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.lg-drawer-head { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; }
+/* 列表单独滚动：flex 1 + min-height: 0 才能在不撑破抽屉的前提下拿到真实可滚高度。
+   padding-right 给滚动条留位，避免滑块压在目录项的点击区上。 */
+.lg-drawer-list {
+  list-style: none; margin: 0; padding: 0 4px 0 0; display: flex; flex-direction: column; gap: 4px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+}
 .lg-drawer-list li { display: flex; gap: 6px; align-items: center; }
 .lg-drawer-list li > button:first-child {
   flex: 1; text-align: left; border: none; background: transparent; color: var(--lg-fg-secondary);

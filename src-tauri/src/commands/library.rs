@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::contracts::dto::{
     DocumentDetailDto, DocumentDto, DocumentQuery, DocumentSourceDto, LibraryRootDto, PageDto,
-    ScanStartedDto,
+    ScanOutcomeDto, ScanStartedDto,
 };
 use crate::contracts::evt::{LibraryChangedEvent, LibraryChangeKind, ScanPhase, ScanProgressEvent,
     E_LIBRARY_CHANGED, E_LIBRARY_SCAN_PROGRESS};
@@ -185,6 +185,127 @@ pub async fn library_scan_start(
     });
 
     Ok(ScanStartedDto { started: true, reason: None })
+}
+
+/// 同步扫描：扫完才返回计数（「刷新」用）。
+///
+/// 为什么需要它：`library_scan_start` 立即返回，前端拿不到「已经扫完」这一刻，
+/// 于是「刷新」只能重读旧库 —— 这就是新增/删除文本后刷新看不到变化的原因。
+/// 单个库根扫描失败只记日志、不阻断整次刷新（已扫完的库根结果照常反映到列表）。
+#[tauri::command]
+pub async fn library_scan_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root_id: Option<i64>,
+) -> Result<ScanOutcomeDto, ApiError> {
+    let repos = SqlRepos;
+    let targets: Vec<LibraryRootDto> = state.with_db(|db| {
+        db.with_read(|conn| {
+            let all = LibraryRootRepo::list(&repos, conn)?;
+            Ok(match root_id {
+                Some(id) => all.into_iter().filter(|r| r.id == id && r.enabled).collect(),
+                None => all.into_iter().filter(|r| r.enabled).collect(),
+            })
+        })
+    })?;
+
+    // 没有可扫描的库根不是错误：刷新照常重读列表即可（返回全 0 计数）。
+    if targets.is_empty() {
+        return Ok(ScanOutcomeDto::default());
+    }
+
+    let handle = app.clone();
+    let total = tauri::async_runtime::spawn_blocking(move || {
+        let mut total = ScanOutcomeDto::default();
+        for root in targets {
+            let db_state = handle.state::<AppState>();
+            let _ = handle.emit(
+                E_LIBRARY_SCAN_PROGRESS,
+                ScanProgressEvent {
+                    root_id: Some(root.id),
+                    phase: ScanPhase::Walking,
+                    scanned: 0,
+                    added: 0,
+                    updated: 0,
+                    removed: 0,
+                    error: None,
+                },
+            );
+
+            let outcome = db_state.with_db(|db| scan_root(db, root.id, Path::new(&root.path)));
+            match outcome {
+                Ok(out) => {
+                    let _ = handle.emit(
+                        E_LIBRARY_SCAN_PROGRESS,
+                        ScanProgressEvent {
+                            root_id: Some(root.id),
+                            phase: ScanPhase::Done,
+                            scanned: out.scanned as i64,
+                            added: out.added as i64,
+                            updated: out.updated as i64,
+                            removed: out.removed as i64,
+                            error: None,
+                        },
+                    );
+                    let mut kinds = Vec::new();
+                    if out.added + out.revived > 0 {
+                        kinds.push(LibraryChangeKind::Added);
+                    }
+                    if out.updated > 0 {
+                        kinds.push(LibraryChangeKind::Updated);
+                    }
+                    if out.removed > 0 {
+                        kinds.push(LibraryChangeKind::Removed);
+                    }
+                    if !kinds.is_empty() {
+                        let _ = handle.emit(
+                            E_LIBRARY_CHANGED,
+                            LibraryChangedEvent {
+                                kinds,
+                                document_ids: Vec::new(),
+                                root_id: Some(root.id),
+                            },
+                        );
+                    }
+                    total.scanned += out.scanned as i64;
+                    total.added += out.added as i64;
+                    total.updated += out.updated as i64;
+                    total.revived += out.revived as i64;
+                    total.removed += out.removed as i64;
+                }
+                Err(err) => {
+                    tracing::error!(?err, root = %root.path, "刷新扫描失败");
+                    let _ = handle.emit(
+                        E_LIBRARY_SCAN_PROGRESS,
+                        ScanProgressEvent {
+                            root_id: Some(root.id),
+                            phase: ScanPhase::Done,
+                            scanned: 0,
+                            added: 0,
+                            updated: 0,
+                            removed: 0,
+                            error: Some(err),
+                        },
+                    );
+                }
+            }
+        }
+        total
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("刷新扫描线程异常: {err}")))?;
+
+    Ok(total)
+}
+
+/// 弹出系统文件管理器窗口选择文献库目录（替代让用户手输绝对路径）。
+///
+/// 对话框会阻塞所在线程，所以必须放在阻塞线程池里，不能占用 async 运行时。
+#[tauri::command]
+pub async fn library_pick_folder() -> Result<Option<String>, ApiError> {
+    tauri::async_runtime::spawn_blocking(crate::library::pick_folder)
+        .await
+        .map_err(|err| ApiError::internal(format!("目录选择线程异常: {err}")))?
 }
 
 #[tauri::command]
