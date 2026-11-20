@@ -260,17 +260,22 @@ pub fn run() {
             // Tauri 2 传入的是 UriSchemeContext，需先取 AppHandle 才能访问受管状态。
             let handle = app.app_handle();
             let state = handle.state::<AppState>();
-            let resolved = state.with_db(|db| {
-                let repos = db::repo::SqlRepos;
-                db.with_read(|conn| {
-                    use db::repo::DocumentRepo;
-                    repos.abs_path_of(conn, doc_id)
-                })
-            });
 
-            let path = match resolved {
-                Ok((abs_path, _, _, _)) => std::path::PathBuf::from(abs_path),
-                Err(err) => {
+            // P1-2：pdf:// 句柄 + 最近段缓存。命中时省掉查库与 File::open，只留一次指纹校验的 stat；
+            // 文件被库扫描/用户改写（size 或 mtime 变化）则重开句柄并丢段，绝不返回陈旧字节。
+            let source = match state.pdf_cache.source(doc_id, || {
+                state
+                    .with_db(|db| {
+                        let repos = db::repo::SqlRepos;
+                        db.with_read(|conn| {
+                            use db::repo::DocumentRepo;
+                            repos.abs_path_of(conn, doc_id)
+                        })
+                    })
+                    .map(|(abs_path, _, _, _)| std::path::PathBuf::from(abs_path))
+            }) {
+                Ok(source) => source,
+                Err(protocol::cache::SourceError::Lookup(err)) => {
                     // 只有「数据库里没有这条记录」才是 404，其余查库失败是 500。
                     let status = protocol::status_for_lookup_error(&err);
                     tracing::warn!(document_id = doc_id, status, ?err, "pdf:// 查库失败");
@@ -279,14 +284,10 @@ pub fn run() {
                     responder.respond(protocol::build_response(&plan, body));
                     return;
                 }
-            };
-
-            let size = match std::fs::metadata(&path) {
-                Ok(meta) => meta.len(),
-                Err(err) => {
-                    // 记录在库但磁盘上：410 不存在 / 403 无权限 / 423 被占用 / 500 其它。
+                Err(protocol::cache::SourceError::Io(path, err)) => {
+                    // 记录在库但磁盘上读不到：410 不存在 / 403 无权限 / 423 被占用 / 500 其它。
                     let status = protocol::status_for_io_error(&err);
-                    tracing::warn!(?path, status, ?err, "pdf:// 读取文件元数据失败");
+                    tracing::warn!(?path, status, ?err, "pdf:// 打开文件失败");
                     let plan = protocol::plan_error(status, protocol::io_error_reason(&path, &err));
                     let body = plan.body_bytes();
                     responder.respond(protocol::build_response(&plan, body));
@@ -294,17 +295,28 @@ pub fn run() {
                 }
             };
 
-            let mut plan = protocol::plan_ok(range_header, size);
+            let mut plan = protocol::plan_ok(range_header, source.size);
             // HEAD 只回头部：同一份计划，但不读 plan.span 的字节，Content-Length 仍是真实长度。
             let mut body = if is_head { Vec::new() } else { plan.body_bytes() };
             if !is_head {
                 if let Some((start, len)) = plan.span {
-                    match protocol::read_span(&path, start, len) {
+                    // 段命中直接返回缓存字节；未命中才用缓存句柄读盘（失败分派与原先一致）。
+                    match state.pdf_cache.read(&source, start, len) {
                         Ok(bytes) => body = bytes,
                         Err(err) => {
                             let status = protocol::status_for_io_error(&err);
-                            tracing::error!(?path, status, start, len, ?err, "pdf:// 区间读取失败");
-                            plan = protocol::plan_error(status, protocol::io_error_reason(&path, &err));
+                            tracing::error!(
+                                path = %source.path.display(),
+                                status,
+                                start,
+                                len,
+                                ?err,
+                                "pdf:// 区间读取失败"
+                            );
+                            plan = protocol::plan_error(
+                                status,
+                                protocol::io_error_reason(&source.path, &err),
+                            );
                             body = plan.body_bytes();
                         }
                     }

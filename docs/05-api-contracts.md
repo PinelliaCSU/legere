@@ -357,7 +357,14 @@ export interface RenderScheduler {
   setViewport(v: ViewportState): void;
   setBudget(b: Partial<RenderBudget>): void;
   getPageState(pageNo: number): PageRenderState | undefined;
+  retry(pageNo: number): void;      // 单页失败后的显式重试（失败页默认不再自动入队）
   subscribe(cb: (states: ReadonlyMap<number, PageRenderState>) => void): () => void;
+  // v0.13 增补（R25）：文本提取的唯一入口。渲染、文本层与文内搜索共用同一份
+  // 字节预算 LRU 与在途去重；调用方不得再自己 getPage + getTextContent。
+  getTextContent(pageNo: number): Promise<TextContentHandle>;
+  // v0.13 增补（R25）：批量预热文本（搜索扫描、空闲预取），并发夹取到 [1,4]，
+  // 单页失败不抛出（错误留给该页渲染或搜索自己上报）。
+  prefetchText(pageNos: number[], opts?: { concurrency?: number; shouldContinue?: () => boolean }): Promise<void>;
   dispose(): void;                  // 幂等：取消任务、释放 canvas、清空缓存
 }
 ```
@@ -467,6 +474,7 @@ export interface ReaderApi {
 | R22 | 新增 `library_root_update { id, displayName }` → `LibraryRootDto`：**只改显示名**（trim 后不得为空，最长 120 字）。路径变更不走这里——换文件夹等于换内容，必须走 R23，否则旧路径下的文档记录会留在库里，正是「改了文献库但旧文献还在」的成因。成功后发 `library://changed { kinds:[updated], rootId }` | 03/05 只有 add/remove，没有任何「改」的路径 | M04 命令 + `LibraryRootRepo::rename`；M14 文献库列表行操作 |
 | R23 | 新增 `library_root_replace { id, path }` → `LibraryRootDto`：把库根指向另一个文件夹，并在**同一事务内硬删除**该库根下全部文档记录（逐条走 `delete_record`，先清 contentless 的 `page_fts` 再删行，级联清 `page_text/bookmarks/reading_progress/indexing_jobs`），随后 `UPDATE library_roots SET path, last_scanned_at = NULL`，发 `library://changed { kinds:[removed], rootId }`，由前端再发起 `library_scan_start`。**为什么硬删除而不是软删除**：`documents` 上有 `UNIQUE (library_root_id, rel_path_key)`，软删除的行仍占着该键，换文件夹后同名文件会插入失败。路径与其它库根冲突时前置判为 `E_INVALID_ARG`，不把 `E_DB` 抛给前端。磁盘上的旧文件一个都不动（沿用 R16 的约定） | 没有任何「换库」的路径；用户只能移除再用添加，且旧记录会占着唯一键 | M04 命令 + `LibraryRootRepo::replace_path` / `DocumentRepo::purge_documents_of_root`；M03 无 schema 变更；M14 文献库列表行操作 |
 | R24 | 新增 `library_scan_now { rootId? }` → `ScanOutcomeDto { scanned, added, updated, revived, removed }`：**同步**扫描，扫完才返回计数（单库根失败只记日志并继续，不让整次刷新失败），期间照常发 `library://scan-progress`，并按实际变化发 `library://changed { kinds }`。**为什么必须新增**：`library_scan_start` 立即返回，前端无法知道「扫描完成」这一刻，于是「刷新」只能重读旧库（新增/删除的文本要重选路径才可见）。同时新增 `library_pick_folder` → `string \| null`（null = 用户取消），用系统文件管理器窗口代替手输绝对路径；Windows 侧走 `IFileOpenDialog + FOS_PICKFOLDERS`（复用 tauri 已缓存的 `windows` crate，不新增下载），其它平台返回 `E_UNSUPPORTED` | 没有任何可等待的扫描完成信号；添加/替换库根只能靠 `setTimeout(2000)` 猜 | M04 命令 + `library/dialog.rs`；M14 文献库工具栏「刷新」与添加/替换对话框 |
+| R25 | M06 新增两个方法 `getTextContent` / `prefetchText`（并把已实现但漏记的 `retry` 补进契约）。**为什么必须新增**：文本提取此前散落在四处（scheduler、M07 的几何循环、PageSlot 文本层、文内搜索），同一页可能被解析 2–3 次，搜索还完全绕开 `textCache`。新增后「谁解析文本」只有一个答案，M07 不再直接调用引擎 | 05 §7 缺文本入口，导致 08 §6 的文本 LRU 事实上没人共用 | M06 提供；M07 的文内搜索与文本层改为消费它（行为不变，仅去重） |
 | R18 | 引擎类型与调度类型分文件归属：`src/pdf-engine/types.ts`（M05）与 `src/render/types.ts`（M06），禁止双写同义类型 | 05 §7 原注释把两类都指向 pdf-engine | M05/M06 各自只写自己那份 |
 
 后续如需新增表格类字段，同样在本表登记 R7、R8…，不要在代码里悄悄改契约。
