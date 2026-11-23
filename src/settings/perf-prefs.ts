@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 // 性能相关设置项（v0.13 新增）。值都是纯文本，与 reader-prefs 同一套约定（docs/15）。
-=======
-// 性能相关设置项（v0.2 新增）。值都是纯文本，与 reader-prefs 同一套约定（docs/15）。
->>>>>>> fd010f8aa2c88c31f8dd15affbb12730a8b0aa12
 //
 // 两个键的区别：
 //   · perf.idleTextPrefetchPages —— 空闲预取**文本**的页数，真实生效（P2-1，默认 0 关闭）。

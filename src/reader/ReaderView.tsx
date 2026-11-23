@@ -43,7 +43,7 @@ import { OutlineDrawer } from "./OutlineDrawer";
 import { mountHighlights } from "./highlight";
 import { createIndexYield } from "./index-yield";
 import { findInPage, snippetAt, type DocSearchHit } from "./search/doc-search";
-import { mountTextLayer } from "./text-layer";
+import { mountTextLayer, type MountedTextLayer } from "./text-layer";
 import {
   MAX_SCALE,
   MIN_SCALE,
@@ -239,11 +239,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
 
   useEffect(() => () => scheduler.dispose(), [scheduler]);
 
-<<<<<<< HEAD
   // 性能设置（v0.13）：空闲文本预取默认关闭；文档常驻预加载 (待补充) 恒为 0。
-=======
-  // 性能设置（v0.2）：空闲文本预取默认关闭；文档常驻预加载 (待补充) 恒为 0。
->>>>>>> fd010f8aa2c88c31f8dd15affbb12730a8b0aa12
   useEffect(() => {
     void (async () => {
       try {
@@ -1037,20 +1033,49 @@ function PageSlot({
   onRetry,
 }: PageSlotProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const textRef = useRef<{ destroy: () => void } | null>(null);
+  const textRef = useRef<MountedTextLayer | null>(null);
   const highlightRef = useRef<(() => void) | null>(null);
   const contentRef = useRef<TextContentHandle | null>(null);
+  const mountedRef = useRef<{ content: TextContentHandle; scale: number; heightPt: number } | null>(null);
+  const detachGuard = useRef<(() => void) | null>(null);
   const width = Math.round(geometry.widthPt * scale);
   const height = Math.round(geometry.heightPt * scale);
+
+  /// 选区还落在本页的文本层里吗：卸层会把选区连同节点一起抽走，所以要等它先散。
+  const holdsSelection = (): boolean => {
+    const container = textRef.current?.container;
+    if (container === undefined) return false;
+    const sel = window.getSelection();
+    if (sel === null || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    return container.contains(sel.anchorNode) || container.contains(sel.focusNode);
+  };
+
+  const dropLayer = (): void => {
+    textRef.current?.destroy();
+    textRef.current = null;
+    contentRef.current = null;
+    mountedRef.current = null;
+  };
 
   useEffect(() => {
     const host = hostRef.current;
     if (host === null) return;
+    detachGuard.current?.();
+    detachGuard.current = null;
     if (!mountText) {
-      // 远离当前页：卸掉文本层，释放 DOM 与文本内容
-      textRef.current?.destroy();
-      textRef.current = null;
-      contentRef.current = null;
+      // 远离当前页：卸掉文本层，释放 DOM 与文本内容；选区还在这页上时先留着，散开后再卸。
+      if (textRef.current === null || !holdsSelection()) {
+        dropLayer();
+        return;
+      }
+      const onSelectionChange = (): void => {
+        if (holdsSelection()) return;
+        detachGuard.current?.();
+        detachGuard.current = null;
+        dropLayer();
+      };
+      document.addEventListener("selectionchange", onSelectionChange);
+      detachGuard.current = () => document.removeEventListener("selectionchange", onSelectionChange);
       return;
     }
     let cancelled = false;
@@ -1058,26 +1083,46 @@ function PageSlot({
       try {
         const content = state?.textContent ?? (await requestText(pageNo));
         if (cancelled) return;
-        // 图片扫描页没有文字：不挂空白文本层，避免出现无意义的选择区域（16 §2）。
-        if (content.items.length === 0) {
-          textRef.current?.destroy();
-          textRef.current = null;
-          contentRef.current = null;
+        const mounted = mountedRef.current;
+        // 同一份文本、同一比例已经挂好了就不再重挂：文本迟到或状态补丁会把节点整体换掉，
+        // 正在拖的选区会在没有任何可见原因的情况下消失。
+        if (
+          textRef.current !== null &&
+          mounted !== null &&
+          mounted.content === content &&
+          mounted.scale === scale &&
+          mounted.heightPt === geometry.heightPt
+        ) {
+          return;
+        }
+        // 没有可见字符的页不挂文本层（16 §2）：扫描页是这样，字体缺 Unicode 映射时 pdfjs 也可能
+        // 只给出空串 item —— 那种情况下去挂层会留下一层透明、吃指针事件却选不出任何东西的容器。
+        if (!content.items.some((item) => item.str.trim().length > 0)) {
+          dropLayer();
           return;
         }
         contentRef.current = content;
         textRef.current?.destroy();
         textRef.current = mountTextLayer(host, content, scale, geometry.heightPt);
+        mountedRef.current = { content, scale, heightPt: geometry.heightPt };
       } catch (err) {
         console.warn("文本层挂载失败", pageNo, err);
       }
     })();
     return () => {
       cancelled = true;
-      textRef.current?.destroy();
-      textRef.current = null;
     };
   }, [pageNo, requestText, scale, geometry.heightPt, state?.textContent, mountText]);
+
+  // 只有卸载（切页、换文档、退出阅读器）才真的销毁文本层；挂载/更新路径靠上面的判断复用旧层。
+  useEffect(
+    () => () => {
+      detachGuard.current?.();
+      detachGuard.current = null;
+      dropLayer();
+    },
+    [],
+  );
 
   // 高亮：当前命中页的命中区间
   useEffect(() => {
