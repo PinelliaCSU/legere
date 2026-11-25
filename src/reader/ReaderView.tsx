@@ -68,6 +68,7 @@ export interface ReaderApi {
 
 interface ReaderViewProps {
   documentId: number;
+  initialPage?: number;
   onExit: () => void;
   onProgress: (p: { pageNo: number; scrollRatio: number; zoom: number; mode: ReadMode }) => void;
   onApiReady?: (api: ReaderApi) => void;
@@ -85,7 +86,7 @@ function errorText(code: string | null): string {
   return isApiErrorCode(code) ? API_ERROR_TEXT[code] : "出现内部错误";
 }
 
-export function ReaderView({ documentId, onExit, onProgress, onApiReady }: ReaderViewProps): ReactElement {
+export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiReady }: ReaderViewProps): ReactElement {
   const scheduler = useMemo(() => createRenderScheduler(), []);
   /// 阅读期间让位给前台：连续交互暂停后台索引，空闲后恢复（P2-2，docs/08 §10）。
   const indexYield = useMemo(() => createIndexYield(), []);
@@ -124,9 +125,8 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   const jumpRef = useRef<HTMLInputElement | null>(null);
   /// 面板里的「跳页」输入（长文档没有内置目录时，这是唯一能直达的办法）。
   const [jumpInput, setJumpInput] = useState("");
-  /// 从 progress_get 恢复的页码：等几何补齐到该页后再跳。
+  /// 搜索命中或上次阅读的页码：等几何补齐到该页后再跳。
   const [resumePage, setResumePage] = useState<number | null>(null);
-  const resumeApplied = useRef(false);
 
   /// 页盒子只随「几何 / 缩放」变化重算一次：滚动路径上复用同一份（P0-2）。
   const pageBoxes = useMemo(() => (geos.length === 0 ? [] : computePageBoxes(geos, scale)), [geos, scale]);
@@ -141,10 +141,12 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     setHits([]);
     setOutline([]);
     setResumePage(null);
-    resumeApplied.current = false;
+    setCurrentPage(1);
 
     void (async () => {
       let handle: DocumentHandle | null = null;
+      let opened = false;
+      let savedPage = 1;
       try {
         const [{ call }, { CMD }] = await Promise.all([import("../core/ipc"), import("../contracts/cmd")]);
 
@@ -156,12 +158,13 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
               setScale(progress.zoom);
             }
             if (progress.mode === "single" || progress.mode === "continuous") setMode(progress.mode);
-            if (typeof progress.pageNo === "number" && progress.pageNo > 1) setResumePage(progress.pageNo);
+            savedPage = progress.pageNo;
           } else if (alive) {
             // 这本书还没有进度：用设置里的「默认阅读模式 / 默认缩放」。
             // 已经读过一次的书不再受默认值影响 —— 用户在书里调过的东西优先。
             try {
               const all = await call(CMD.SETTINGS_GET_ALL, {});
+              if (!alive) return;
               const mode = parseDefaultMode(all[READER_DEFAULT_MODE_KEY]);
               if (mode !== null) setMode(mode);
               const scale = parseDefaultScale(all[READER_DEFAULT_SCALE_KEY]);
@@ -174,18 +177,26 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
           // 忽略：进度只是锦上添花。
         }
 
+        if (!alive) return;
         const source = await call(CMD.DOCUMENT_URL, { id: documentId });
+        if (!alive) return;
         handle = await pdfEngine.openDocument({ url: source.url, docId: documentId });
         if (!alive) {
           await handle.dispose();
           return;
         }
-        setDoc(handle);
-
         const first = await handle.getPage(1);
-        if (!alive) return;
+        if (!alive) {
+          await handle.dispose();
+          return;
+        }
+        const target = Math.min(handle.pageCount, Math.max(1, initialPage ?? savedPage));
+        opened = true;
+        setResumePage(target > 1 ? target : null);
+        setDoc(handle);
         setGeos([first.geometry]);
         setLoading(false);
+        void call(CMD.DOCUMENT_TOUCH_OPENED, { id: documentId }).catch(() => undefined);
 
         // 渐进补齐：每批 GEO_BATCH 页更新一次 state，首屏不被阻塞。
         const acc: PageGeometry[] = [first.geometry];
@@ -209,12 +220,9 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
           walk(nodes);
           setOutline(flat);
         }
-        await call(CMD.DOCUMENT_TOUCH_OPENED, { id: documentId });
       } catch (err) {
-        if (!alive) {
-          await handle?.dispose();
-          return;
-        }
+        if (!opened) await handle?.dispose();
+        if (!alive) return;
         const e = err as { code?: string };
         setError(e.code ?? "E_INTERNAL");
         setLoading(false);
@@ -224,7 +232,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     return () => {
       alive = false;
     };
-  }, [documentId, reloadKey]);
+  }, [documentId, initialPage, reloadKey]);
 
   useEffect(() => () => void doc?.dispose(), [doc]);
 
@@ -276,6 +284,8 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   // 离开阅读器必须把索引恢复回去（P2-2）。
   useEffect(() => () => indexYield.dispose(), [indexYield]);
 
+  const singlePage = mode === "single" ? currentPage : null;
+
   // 视口发布 + 当前页：滚动只记位置，计算与调度合并到下一帧（docs/08 §8）。
   // 旧实现每个 scroll 事件都直接 setViewport + 重算当前页：60Hz 滚动 = 每秒 60 次
   // O(页数) 的盒子重算 + 60 次全量状态 Map 拷贝，滚动的大头开销就在这里。
@@ -288,7 +298,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
       const el = scrollRef.current;
       if (el === null) return;
       scheduler.setViewport({
-        mode,
+        ...(singlePage === null ? { mode: "continuous" } : { mode: "single", currentPage: singlePage }),
         scale,
         scrollTop: el.scrollTop,
         viewportHeight: el.clientHeight,
@@ -296,7 +306,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
         pageGeometries: geos,
       });
       // 单页模式的页码由 currentPage 决定，不能由滚动位置反推（容器里只有一页）。
-      if (mode !== "single") {
+      if (singlePage === null) {
         const next = currentPageAt(pageBoxes, el.scrollTop, el.clientHeight);
         setCurrentPage((prev) => (prev === next ? prev : next));
       }
@@ -319,7 +329,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
       observer?.disconnect();
       window.removeEventListener("resize", schedule);
     };
-  }, [doc, geos, indexYield, mode, pageBoxes, scale, scheduler]);
+  }, [doc, geos, indexYield, pageBoxes, scale, scheduler, singlePage]);
 
   // 缩放锚点：保持当前页顶部仍在视口顶部（否则一缩放就跳回开头）。
   const prevScale = useRef(scale);
@@ -328,8 +338,12 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
     prevScale.current = scale;
     const scroll = scrollRef.current;
     if (before === scale || scroll === null || geos.length === 0) return;
+    if (mode === "single") {
+      scroll.scrollTop = Math.max(0, (scroll.scrollTop - READER_PADDING) * scale / before + READER_PADDING);
+      return;
+    }
     scroll.scrollTop = anchorScrollTop(computePageBoxes(geos, before), currentPage, 0, scale, geos);
-  }, [scale, geos, currentPage]);
+  }, [scale, geos, currentPage, mode]);
 
   // 单页 -> 连续：把当前页滚回视口顶部（否则切回来后停在第 1 页，位置全丢）。
   const prevMode = useRef(mode);
@@ -344,7 +358,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   }, [mode, geos.length, pageBoxes, currentPage]);
 
   useEffect(() => {
-    if (doc === null) return;
+    if (doc === null || resumePage !== null) return;
     const timer = window.setInterval(() => {
       const scroll = scrollRef.current;
       if (scroll === null) return;
@@ -356,7 +370,7 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [doc, currentPage, scale, mode, onProgress]);
+  }, [doc, currentPage, resumePage, scale, mode, onProgress]);
 
   const goToPage = useCallback(
     (pageNo: number) => {
@@ -410,9 +424,8 @@ export function ReaderView({ documentId, onExit, onProgress, onApiReady }: Reade
   );
   // 恢复进度：几何补齐到目标页后跳一次（只跳一次，避免用户翻页后被拽回）。
   useEffect(() => {
-    if (resumeApplied.current || resumePage === null) return;
+    if (resumePage === null) return;
     if (geos.length < resumePage) return;
-    resumeApplied.current = true;
     goToPage(resumePage);
     showNotice("已回到第 " + resumePage + " 页");
     setResumePage(null);

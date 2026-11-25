@@ -1,6 +1,6 @@
 [package]
 name = "legere"
-version = "1.0.0"
+version = "1.0.1"
 description = "Legere — 个人 PDF 文献库阅读器"
 edition = "2021"
 rust-version = "1.77"

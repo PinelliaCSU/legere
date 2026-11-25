@@ -251,9 +251,12 @@ export class RenderSchedulerImpl implements RenderScheduler {
     const viewport = this.viewport;
     if (this.disposed || doc === null || viewport === null) return;
 
-    const range = computeVisibleRange(this.boxes, viewport.scrollTop, viewport.viewportHeight);
+    const singlePage = viewport.mode === "single" ? this.boxes[viewport.currentPage - 1] : undefined;
+    const range = viewport.mode === "single"
+      ? { first: viewport.currentPage, last: singlePage === undefined ? viewport.currentPage - 1 : viewport.currentPage }
+      : computeVisibleRange(this.boxes, viewport.scrollTop, viewport.viewportHeight);
     // 跳页保护：一轮跨度过大时本轮只排队可见页（docs/08 §2）。
-    const prefetch = shouldSkipPrefetch(range)
+    const prefetch = range.last < range.first || shouldSkipPrefetch(range)
       ? range
       : expandForPrefetch(range, doc.pageCount, this.budget.prefetchPages);
     const visible = new Set<number>();
@@ -267,9 +270,11 @@ export class RenderSchedulerImpl implements RenderScheduler {
     // 2) 打分并排序候选页（可见页永远排在预取页之前，见 layout.PREFETCH_TIER）
     const ctx: PriorityContext = {
       range,
-      scrollTop: viewport.scrollTop,
+      scrollTop: viewport.scrollTop + (singlePage?.top ?? 0),
       viewportHeight: viewport.viewportHeight,
-      currentPage: currentPageAt(this.boxes, viewport.scrollTop, viewport.viewportHeight),
+      currentPage: viewport.mode === "single"
+        ? viewport.currentPage
+        : currentPageAt(this.boxes, viewport.scrollTop, viewport.viewportHeight),
       scrollSign: this.scrollSign,
       scale: viewport.scale,
       cachedScaleOf: (pageNo) => this.canvasCache.peek(pageNo)?.scale ?? null,
@@ -292,7 +297,7 @@ export class RenderSchedulerImpl implements RenderScheduler {
       void this.startRender(candidate.pageNo, viewport.scale, visible.has(candidate.pageNo));
     }
 
-    this.evictAndEmit();
+    this.evictAndEmit(visible);
   }
 
   private async startRender(pageNo: number, scale: number, isVisible: boolean): Promise<void> {
@@ -368,13 +373,7 @@ export class RenderSchedulerImpl implements RenderScheduler {
     this.inFlight.delete(pageNo);
   }
 
-  private evictAndEmit(): void {
-    const protect = new Set<number>();
-    const viewport = this.viewport;
-    if (viewport !== null) {
-      const range = computeVisibleRange(this.boxes, viewport.scrollTop, viewport.viewportHeight);
-      for (let p = range.first; p <= range.last; p += 1) protect.add(p);
-    }
+  private evictAndEmit(protect: Set<number>): void {
     for (const pageNo of this.inFlight.keys()) protect.add(pageNo);
     for (const evictedKey of this.canvasCache.evict(protect)) {
       this.patch(evictedKey, { canvas: null, state: "idle" });

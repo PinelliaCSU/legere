@@ -69,7 +69,7 @@ function toHomeBook(doc: DocumentDto): HomeBook {
 }
 
 export function AppShell(): ReactElement {
-  const { route, activeDocumentId, globalSearchOpen, openRoute, openDocument, closeDocument } = useAppStore();
+  const { route, activeDocumentId, readerStartPage, readerOpenCount, globalSearchOpen, openRoute, openDocument, closeDocument } = useAppStore();
   const {
     theme,
     setTheme,
@@ -209,8 +209,8 @@ export function AppShell(): ReactElement {
   // 需求 5：打开书就记住它；从阅读器退回主页就忘掉它。
   // 于是「退出应用时正在读书」== 设置仍在 == 下次启动直接回到那本书。
   const openBook = useCallback(
-    (documentId: number) => {
-      openDocument(documentId);
+    (documentId: number, pageNo?: number) => {
+      openDocument(documentId, pageNo);
       persistSetting(LAST_READ_SETTING_KEY, String(documentId));
     },
     [openDocument, persistSetting],
@@ -575,7 +575,9 @@ export function AppShell(): ReactElement {
 
         {route === "reader" && activeDocumentId !== null ? (
           <ReaderView
+            key={readerOpenCount}
             documentId={activeDocumentId}
+            initialPage={readerStartPage}
             onExit={leaveReader}
             onProgress={saveProgress(activeDocumentId)}
           />
@@ -767,7 +769,7 @@ export function AppShell(): ReactElement {
                   <ul>
                     {group.hits.map((hit) => (
                       <li key={hit.pageNo}>
-                        <button type="button" onClick={() => openBook(group.documentId)}>
+                        <button type="button" onClick={() => openBook(group.documentId, hit.pageNo)}>
                           p{hit.pageNo} {hit.snippet}
                         </button>
                       </li>

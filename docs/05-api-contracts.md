@@ -341,11 +341,11 @@ export interface PageRenderState {
   error: ApiError | null;
 }
 
-export interface ViewportState {
-  mode: ReadMode; scale: number;
+export type ViewportState = {
+  scale: number;
   scrollTop: number; viewportHeight: number; viewportWidth: number;
   pageGeometries: PageGeometry[];   // index 0 = page 1
-}
+} & ({ mode: "continuous" } | { mode: "single"; currentPage: number });
 
 // 默认值（契约值，可被 setBudget 覆盖）：maxConcurrent 2、cacheBytes 268435456(256 MiB)、prefetchPages 2
 export interface RenderBudget { maxConcurrent: number; cacheBytes: number; prefetchPages: number }

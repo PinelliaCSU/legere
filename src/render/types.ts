@@ -16,14 +16,13 @@ export interface PageRenderState {
 
 export type ReadMode = "continuous" | "single";
 
-export interface ViewportState {
-  mode: ReadMode;
+export type ViewportState = {
   scale: number;
   scrollTop: number;
   viewportHeight: number;
   viewportWidth: number;
   pageGeometries: PageGeometry[];
-}
+} & ({ mode: "continuous" } | { mode: "single"; currentPage: number });
 
 export interface RenderBudget {
   maxConcurrent: number;

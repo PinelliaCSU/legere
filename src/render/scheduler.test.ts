@@ -95,6 +95,26 @@ const flush = async (): Promise<void> => {
 };
 
 describe("调度器准入与去重（P0-1）", () => {
+  it("单页模式按当前页调度与保留位图，翻页后仍从页内顶部开始", async () => {
+    const scheduler = createRenderScheduler();
+    const doc = new FakeDocument();
+    scheduler.setDocument(doc);
+    scheduler.setBudget({ cacheBytes: 1, prefetchPages: 0 });
+    const base = { ...viewport(0), mode: "single" as const };
+
+    scheduler.setViewport({ ...base, currentPage: 20 });
+    await flush();
+    expect(doc.renderCalls).toEqual([20]);
+    expect(scheduler.getPageState(20)?.state).toBe("ready");
+
+    scheduler.setViewport({ ...base, currentPage: 21 });
+    await flush();
+    expect(doc.renderCalls).toEqual([20, 21]);
+    expect(scheduler.getPageState(21)?.state).toBe("ready");
+    expect(scheduler.getPageState(20)?.canvas).toBeNull();
+    scheduler.dispose();
+  });
+
   it("并发上限覆盖 getPage 阶段，不会把整个窗口一次全启动", () => {
     const scheduler = createRenderScheduler();
     const doc = new FakeDocument(40);
