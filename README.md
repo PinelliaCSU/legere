@@ -31,6 +31,7 @@ pnpm typecheck
 pnpm check-contracts
 pnpm check-theme
 pnpm test
+node scripts/pdf-matrix.mjs
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 pnpm tauri:build --bundles nsis,msi
 ```
