@@ -111,7 +111,7 @@ describe("调度器准入与去重（P0-1）", () => {
     await flush();
     expect(doc.renderCalls).toEqual([20, 21]);
     expect(scheduler.getPageState(21)?.state).toBe("ready");
-    expect(scheduler.getPageState(20)?.canvas).toBeNull();
+    expect(scheduler.getPageState(20)).toBeUndefined();
     scheduler.dispose();
   });
 
@@ -184,6 +184,53 @@ describe("调度器准入与去重（P0-1）", () => {
   });
 });
 
+describe("bitmap fallback and cache lifetime", () => {
+  it("keeps the old bitmap until the visible tiles arrive and reuses it on zoom-out", async () => {
+    const scheduler = createRenderScheduler();
+    const doc = new FakeDocument(1);
+    scheduler.setDocument(doc);
+    const base = { ...viewport(0, 1), viewportHeight: 500 };
+    scheduler.setViewport(base);
+    await flush();
+    const old = scheduler.getPageState(1)!.tiles[0]!;
+    doc.hold();
+    scheduler.setViewport({ ...base, scale: 4 });
+    expect(scheduler.getPageState(1)?.tiles).toContain(old);
+    doc.release();
+    await flush();
+    expect(scheduler.getPageState(1)?.tiles.every(tile => tile.scale === 4 && tile.clip)).toBe(true);
+    const before = doc.renderCalls.length;
+    scheduler.setViewport(base);
+    expect(scheduler.getPageState(1)?.tiles).toEqual([old]);
+    expect(doc.renderCalls).toHaveLength(before);
+    scheduler.dispose();
+  });
+
+  it("evicts old texts under budget and does not leave a second reference in page state", async () => {
+    const scheduler = createRenderScheduler();
+    const doc = new FakeDocument(100);
+    const getPage = doc.getPage.bind(doc);
+    const text = "x".repeat(512 * 1024);
+    doc.getPage = async n => {
+      const page = await getPage(n);
+      return { ...page, getTextContent: async () => {
+        doc.textCalls.push(n);
+        return { items: [], itemStarts: [], text };
+      } };
+    };
+    scheduler.setDocument(doc);
+    scheduler.setViewport(viewport(0, 100));
+    await flush();
+    for (let p = 1; p <= 80; p++) await scheduler.getTextContent(p);
+    await scheduler.getTextContent(80);
+    await scheduler.getTextContent(1);
+    expect(doc.textCalls.filter(n => n === 80)).toHaveLength(1);
+    expect(doc.textCalls.filter(n => n === 1)).toHaveLength(2);
+    expect(scheduler.getPageState(1)).not.toHaveProperty("textContent");
+    scheduler.dispose();
+  });
+});
+
 describe("文本缓存共用（P0-3）", () => {
   it("同一页文本只提取一次，后续命中缓存", async () => {
     const scheduler = createRenderScheduler();
@@ -206,17 +253,18 @@ describe("文本缓存共用（P0-3）", () => {
     scheduler.dispose();
   });
 
-  it("渲染路径与外部调用共用同一份文本缓存", async () => {
+  it("绘制先于文本提取，选择和搜索共用按需文本缓存", async () => {
     const scheduler = createRenderScheduler();
     const doc = new FakeDocument(40);
     scheduler.setDocument(doc);
     scheduler.setBudget({ maxConcurrent: 1, prefetchPages: 0 });
     scheduler.setViewport(viewport(0));
     await flush();
-    const textCallsForPage1 = doc.textCalls.filter((p) => p === 1).length;
-    // 渲染第 1 页时已经提取过；外部再要一次不应重新提取
+    expect(doc.renderCalls).toContain(1);
+    expect(doc.textCalls).toEqual([]);
     await scheduler.getTextContent(1);
-    expect(doc.textCalls.filter((p) => p === 1).length).toBe(textCallsForPage1);
+    await scheduler.getTextContent(1);
+    expect(doc.textCalls.filter((p) => p === 1).length).toBe(1);
     scheduler.dispose();
   });
 

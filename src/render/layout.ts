@@ -30,7 +30,8 @@ export function computePageBoxes(
     const width = geo.widthPt * scale;
     const height = geo.heightPt * scale;
     boxes.push({ pageNo: i + 1, width, height, top });
-    top += height + gap;
+    // PageSlot rounds its CSS height; accumulate the same layout distance on long documents.
+    top += Math.round(height) + gap;
   }
   return boxes;
 }

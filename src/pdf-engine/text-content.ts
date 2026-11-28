@@ -58,12 +58,21 @@ export function itemsInRange(
   end: number,
 ): { item: TextItem; from: number; to: number }[] {
   const out: { item: TextItem; from: number; to: number }[] = [];
-  for (let i = 0; i < content.items.length; i += 1) {
+  // itemStarts is ordered; each highlighted occurrence only needs its own items.
+  let low = 0;
+  let high = content.itemStarts.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (content.itemStarts[mid]! <= start) low = mid + 1;
+    else high = mid;
+  }
+  for (let i = Math.max(0, low - 1); i < content.items.length; i += 1) {
     const item = content.items[i];
     const itemStart = content.itemStarts[i];
     if (item === undefined || itemStart === undefined) continue;
     const itemEnd = itemStart + item.str.length;
-    if (itemEnd <= start || itemStart >= end) continue;
+    if (itemStart >= end) break;
+    if (itemEnd <= start || item.str.length === 0) continue;
     out.push({
       item,
       from: Math.max(start, itemStart) - itemStart,

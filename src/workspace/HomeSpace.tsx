@@ -231,7 +231,7 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
         );
       })}
       {focused !== undefined ? (
-        <div className="lg-home-focused" style={{ left: center.cx, top: center.cy + spineLength / 2 + 40 }}>
+        <div className="lg-home-focused" style={{ left: center.cx, top: center.cy, width: center.radius * 1.36 }}>
           <strong>{focused.title}</strong>
           {meta === "" ? null : <span>{meta}</span>}
         </div>

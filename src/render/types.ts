@@ -1,6 +1,7 @@
 // Render Scheduler 类型（docs/05-api-contracts.md §7 的后半部分）。
 // 与引擎类型分文件归属（契约 R18）：src/pdf-engine/types.ts 归 M05，本文件归 M06。
 
+import type { TileBitmap } from "./tiles";
 import type { DocumentHandle, PageGeometry, TextContentHandle } from "../pdf-engine/types";
 
 export type PageState = "idle" | "queued" | "rendering" | "ready" | "error";
@@ -9,7 +10,7 @@ export interface PageRenderState {
   pageNo: number;
   state: PageState;
   canvas: HTMLCanvasElement | null;
-  textContent: TextContentHandle | null;
+  tiles: TileBitmap[];
   scale: number | null;
   error: { code: string; message: string } | null;
 }
@@ -19,6 +20,8 @@ export type ReadMode = "continuous" | "single";
 export type ViewportState = {
   scale: number;
   scrollTop: number;
+  scrollLeft?: number;
+  pixelRatio?: number;
   viewportHeight: number;
   viewportWidth: number;
   pageGeometries: PageGeometry[];

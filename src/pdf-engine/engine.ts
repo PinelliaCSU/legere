@@ -121,13 +121,14 @@ class PageHandleImpl implements PageHandle {
 
   render(req: RenderRequest): RenderTaskHandle {
     const canvas = document.createElement("canvas");
-    const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+    const dpr = req.pixelRatio ?? (typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
     const scale = req.scale * dpr;
     const viewport = this.page.getViewport({ scale, rotation: this.geometry.rotation });
-    canvas.width = Math.ceil(viewport.width);
-    canvas.height = Math.ceil(viewport.height);
-    canvas.style.width = viewport.width / dpr + "px";
-    canvas.style.height = viewport.height / dpr + "px";
+    const clip = req.clipBox;
+    canvas.width = clip?.w ?? Math.ceil(viewport.width);
+    canvas.height = clip?.h ?? Math.ceil(viewport.height);
+    canvas.style.width = canvas.width / dpr + "px";
+    canvas.style.height = canvas.height / dpr + "px";
 
     const context = canvas.getContext("2d");
     if (!context) {
@@ -136,6 +137,7 @@ class PageHandleImpl implements PageHandle {
 
     const task = this.page.render({
       canvasContext: context,
+      ...(clip ? { transform: [1, 0, 0, 1, -clip.x, -clip.y] } : {}),
       viewport,
       canvas,
       ...(req.backgroundColor ? { background: req.backgroundColor } : {}),

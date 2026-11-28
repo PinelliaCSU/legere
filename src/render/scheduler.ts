@@ -1,32 +1,11 @@
-// M06 · 渲染调度器实现（docs/08）。
-//
-// 关键约束：
-// 1. canvas 与文本缓存的所有权在本类，React 只订阅状态并挂载位图（D08）。
-// 2. 只渲染可见页 + 预取页；窗口外的进行中任务必须取消（缩放/快滚）。
-// 3. 换文档 / dispose 必须释放全部资源（契约 R4：setDocument 语义即释放旧文档）。
-// 4. 准入与去重按「占位 + 调度代号」实现（v0.13 修复）：并发上限必须覆盖 getPage/取文本
-//    阶段；同一页在任一时刻最多只有一个调度在跑，否则两个 RenderTask 会互相覆盖句柄，
-//    先启动的那个再也无法取消。
-// 5. 文本提取只有一条路径（getTextContent）：渲染、文本层挂载、文内搜索共用同一份
-//    字节预算 LRU，谁先到谁填充，其余命中缓存。
-
-import type { DocumentHandle, PageGeometry, PageHandle, RenderTaskHandle, TextContentHandle } from "../pdf-engine/types";
+// Bitmap jobs and text extraction have independent lifetimes. Requests for the
+// same page text share both the in-flight promise and a bounded document cache.
+import type { DocumentHandle, PageGeometry, RenderTaskHandle, TextContentHandle } from "../pdf-engine/types";
 import { BoundedLru } from "./lru";
-import {
-  canvasBytes,
-  computePageBoxes,
-  computeVisibleRange,
-  currentPageAt,
-  expandForPrefetch,
-  pageScore,
-  shouldSkipPrefetch,
-  type PageBox,
-  type PriorityContext,
-} from "./layout";
+import { computePageBoxes, type PageBox } from "./layout";
+import { intersects, planTiles, type TileBitmap, type TileSpec } from "./tiles";
 import { DEFAULT_BUDGET, type PageRenderState, type RenderBudget, type RenderScheduler, type ViewportState } from "./types";
 
-const DPR = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-/// 文本预取的默认并发：提取在 pdf.js worker 里跑，2 路足够且不至于压住位图渲染。
 const TEXT_PREFETCH_CONCURRENCY = 2;
 
 function engineClosed(): Error {
@@ -36,88 +15,70 @@ function engineClosed(): Error {
 export class RenderSchedulerImpl implements RenderScheduler {
   private doc: DocumentHandle | null = null;
   private viewport: ViewportState | null = null;
-  private budget: RenderBudget = DEFAULT_BUDGET;
+  private budget = { ...DEFAULT_BUDGET };
   private disposed = false;
-
   private readonly states = new Map<number, PageRenderState>();
   private readonly listeners = new Set<(states: ReadonlyMap<number, PageRenderState>) => void>();
-  /// 占位表：从「开始准备（getPage + 取文本）」到「渲染结束或放弃」都算占用并发额度。
-  /// 值是该页当前的 RenderTask（还没进到 render 阶段时为 null），取消时据此调 cancel()。
-  private readonly inFlight = new Map<number, RenderTaskHandle | null>();
-  /// 每页调度代号：取消或重新调度都自增；落在 await 后面的任务发现代号变了就自行放弃。
-  private readonly scheduleVersion = new Map<number, number>();
-  /// 文本在途表：并发索要同一页文本时共享同一个解析 Promise，不重复提取。
+  private readonly inFlight = new Map<string, { cancel?: () => void }>();
+  private readonly bitmaps = new BoundedLru<TileBitmap, string>(DEFAULT_BUDGET.cacheBytes);
+  private wanted: TileSpec[] = [];
+  private readonly finishedPrefetch = new Set<string>();
+  private readonly errors = new Map<number, NonNullable<PageRenderState["error"]>>();
   private readonly textPending = new Map<number, Promise<TextContentHandle>>();
-  /// 位图盒子缓存：只有「页几何数组身份或缩放」变化才重算。滚动路径上是 O(1)。
+  private readonly textCache = new BoundedLru<TextContentHandle>(64 * 1024 * 1024);
   private boxesCache: { geoms: PageGeometry[]; scale: number; boxes: PageBox[] } | null = null;
-  /// 本轮状态是否真的变了：pump() 每帧都会跑，没变就不必让 React 重建整张 Map。
-  private dirty = false;
-  private lastScrollTop = 0;
-  private scrollSign: -1 | 0 | 1 = 0;
-  /// 文档代号：切文档时自增。在途的文本提取只有在代号未变时才允许写缓存，
-  /// 否则「切书瞬间」旧书的文本会写进新书的 textCache（同一 pageNo 串页）。
+  private direction: -1 | 0 | 1 = 0;
   private docGeneration = 0;
 
-  /// 位图缓存必须**连同渲染时的 scale 一起存**：旧实现只按 pageNo 取，
-  /// 命中后把当前 scale 盖到状态上，pump() 的「scale 一致就跳过」判断就永远为真，
-  /// 页面槽变宽而位图不重渲染 —— 表现出来就是「放大只是页面变宽，字没变大」。
-  private canvasCache = new BoundedLru<{ canvas: HTMLCanvasElement; scale: number }>(DEFAULT_BUDGET.cacheBytes);
-  private textCache = new BoundedLru<TextContentHandle>(64 * 1024 * 1024);
-  private boxes: PageBox[] = [];
-  /// 用户点了「重试」的页：只有这些页允许在 error 状态下再次入队，
-  /// 否则任何滚动/缩放都会把失败页重新排队（重试风暴）。
-  private readonly retryable = new Set<number>();
-
-  setDocument(handle: DocumentHandle | null): void {
-    // 契约 R4：换文档即以新文档替换旧文档，先释放旧资源。
-    this.cancelAll();
-    this.canvasCache.clear();
+  setDocument(doc: DocumentHandle | null): void {
+    this.docGeneration++;
+    for (const job of this.inFlight.values()) job.cancel?.();
+    this.inFlight.clear();
+    this.bitmaps.clear();
     this.textCache.clear();
     this.textPending.clear();
     this.states.clear();
-    this.retryable.clear();
-    this.scheduleVersion.clear();
+    this.errors.clear();
+    this.finishedPrefetch.clear();
     this.boxesCache = null;
-    this.docGeneration += 1;
-    this.doc = handle;
-    this.boxes = handle === null ? [] : this.ensureBoxes(this.viewport);
-    this.dirty = true;
-    this.emit();
+    this.viewport = null;
+    this.wanted = [];
+    this.doc = doc;
+    for (const cb of this.listeners) cb(this.states);
   }
 
   setViewport(v: ViewportState): void {
-    if (this.disposed) return;
-    const previous = this.viewport;
-    if (previous !== null && previous.scale !== v.scale) {
-      // 缩放/换文档时「滚动方向」没有意义，归零免得把旧方向当成用户意图。
-      this.scrollSign = 0;
-    } else if (previous !== null && v.scrollTop !== this.lastScrollTop) {
-      this.scrollSign = v.scrollTop > this.lastScrollTop ? 1 : -1;
-    }
-    this.lastScrollTop = v.scrollTop;
+    const last = this.viewport;
+    if (!last || last.scale !== v.scale) this.direction = 0;
+    else if (v.scrollTop !== last.scrollTop) this.direction = v.scrollTop > last.scrollTop ? 1 : -1;
     this.viewport = v;
-    this.boxes = this.ensureBoxes(v);
+    const boxes = this.ensureBoxes(v);
+    this.wanted = planTiles(boxes, v, this.budget.prefetchPages, this.direction,
+      pageNo => this.states.get(pageNo)?.tiles.at(-1)?.scale ?? null);
+    const keys = new Set(this.wanted.map(t => t.key));
+    const visible = new Set(this.wanted.filter(t => t.visible).map(t => t.key));
+    const needsVisible = this.wanted.some(t => t.visible && !this.bitmaps.peek(t.key) && !this.inFlight.has(t.key) && !this.errors.has(t.pageNo));
+    for (const [key, job] of this.inFlight) {
+      if (!keys.has(key) || (needsVisible && !visible.has(key))) {
+        this.inFlight.delete(key);
+        job.cancel?.();
+      }
+    }
+    for (const key of this.finishedPrefetch) if (!keys.has(key)) this.finishedPrefetch.delete(key);
+    for (const key of keys) this.bitmaps.get(key);
     this.pump();
   }
 
   setBudget(b: Partial<RenderBudget>): void {
     this.budget = { ...this.budget, ...b };
-    if (b.cacheBytes !== undefined) {
-      this.canvasCache = new BoundedLru<{ canvas: HTMLCanvasElement; scale: number }>(b.cacheBytes);
-    }
-    this.pump();
+    this.bitmaps.budgetBytes = this.budget.cacheBytes;
+    if (this.viewport) this.setViewport(this.viewport);
   }
 
-  getPageState(pageNo: number): PageRenderState | undefined {
-    return this.states.get(pageNo);
-  }
+  getPageState(pageNo: number) { return this.states.get(pageNo); }
 
-  /// 单页失败后的显式重试入口（阅读器占位区里的「重试」按钮）。
   retry(pageNo: number): void {
-    if (this.disposed) return;
-    this.retryable.add(pageNo);
-    this.states.delete(pageNo);
-    this.dirty = true;
+    this.errors.delete(pageNo);
     this.pump();
   }
 
@@ -128,36 +89,10 @@ export class RenderSchedulerImpl implements RenderScheduler {
   }
 
   dispose(): void {
-    if (this.disposed) return;
     this.disposed = true;
-    this.cancelAll();
-    this.canvasCache.clear();
-    this.textCache.clear();
-    this.textPending.clear();
-    this.states.clear();
     this.listeners.clear();
-    this.boxesCache = null;
-    this.doc = null;
+    this.setDocument(null);
   }
-
-  /// 取消某页进行中的渲染（例如该页已滚出窗口）。
-  cancelPage(pageNo: number): void {
-    // 先让在途的调度失效，再取消它的任务：否则任务失败后回到 catch 会把状态又改一次。
-    this.scheduleVersion.set(pageNo, (this.scheduleVersion.get(pageNo) ?? 0) + 1);
-    const task = this.inFlight.get(pageNo);
-    if (task !== undefined && task !== null) task.cancel();
-    this.inFlight.delete(pageNo);
-    const state = this.states.get(pageNo);
-    if (state !== undefined && (state.state === "queued" || state.state === "rendering")) {
-      this.patch(pageNo, { state: "idle" });
-    }
-  }
-
-  private cancelAll(): void {
-    for (const pageNo of [...this.inFlight.keys()]) this.cancelPage(pageNo);
-    this.inFlight.clear();
-  }
-
   /// 取某页文本：缓存优先，在途优先，都没有才真的解析。渲染、文本层、搜索共用这一条路径。
   getTextContent(pageNo: number): Promise<TextContentHandle> {
     const cached = this.textCache.get(pageNo);
@@ -173,7 +108,14 @@ export class RenderSchedulerImpl implements RenderScheduler {
       const page = await doc.getPage(pageNo);
       const text = await page.getTextContent();
       // 切文档期间解析出来的旧书文本只返回给当时的调用方，不污染新书的缓存。
-      if (this.docGeneration === generation) this.textCache.set(pageNo, text, text.text.length * 2);
+      if (this.docGeneration === generation && !this.disposed) {
+        // Account for joined text, item strings, coordinates and the offset array.
+        const bytes = 256 + text.text.length * 2 + text.items.reduce((sum, item) => sum + 72 + item.str.length * 2, 0);
+        if (bytes <= this.textCache.budgetBytes) {
+          this.textCache.set(pageNo, text, bytes);
+          this.textCache.evict();
+        }
+      }
       return text;
     })();
     this.textPending.set(pageNo, task);
@@ -217,168 +159,100 @@ export class RenderSchedulerImpl implements RenderScheduler {
     return boxes;
   }
 
-  private ensureState(pageNo: number): PageRenderState {
-    const existing = this.states.get(pageNo);
-    if (existing !== undefined) return existing;
-    const created: PageRenderState = {
-      pageNo,
-      state: "idle",
-      canvas: null,
-      textContent: null,
-      scale: null,
-      error: null,
-    };
-    this.states.set(pageNo, created);
-    this.dirty = true;
-    return created;
-  }
-
-  private patch(pageNo: number, patch: Partial<PageRenderState>): void {
-    const current = this.ensureState(pageNo);
-    this.states.set(pageNo, { ...current, ...patch });
-    this.dirty = true;
-  }
-
-  private emit(): void {
-    if (!this.dirty) return;
-    this.dirty = false;
-    for (const listener of this.listeners) listener(this.states);
-  }
-
-  /// 调度一次：算可见区间 -> 取消窗口外任务 -> 按优先级补渲染。
   private pump(): void {
-    const doc = this.doc;
-    const viewport = this.viewport;
-    if (this.disposed || doc === null || viewport === null) return;
-
-    const singlePage = viewport.mode === "single" ? this.boxes[viewport.currentPage - 1] : undefined;
-    const range = viewport.mode === "single"
-      ? { first: viewport.currentPage, last: singlePage === undefined ? viewport.currentPage - 1 : viewport.currentPage }
-      : computeVisibleRange(this.boxes, viewport.scrollTop, viewport.viewportHeight);
-    // 跳页保护：一轮跨度过大时本轮只排队可见页（docs/08 §2）。
-    const prefetch = range.last < range.first || shouldSkipPrefetch(range)
-      ? range
-      : expandForPrefetch(range, doc.pageCount, this.budget.prefetchPages);
-    const visible = new Set<number>();
-    for (let p = range.first; p <= range.last; p += 1) visible.add(p);
-
-    // 1) 取消可见窗口外的进行中任务
-    for (const pageNo of [...this.inFlight.keys()]) {
-      if (pageNo < prefetch.first || pageNo > prefetch.last) this.cancelPage(pageNo);
-    }
-
-    // 2) 打分并排序候选页（可见页永远排在预取页之前，见 layout.PREFETCH_TIER）
-    const ctx: PriorityContext = {
-      range,
-      scrollTop: viewport.scrollTop + (singlePage?.top ?? 0),
-      viewportHeight: viewport.viewportHeight,
-      currentPage: viewport.mode === "single"
-        ? viewport.currentPage
-        : currentPageAt(this.boxes, viewport.scrollTop, viewport.viewportHeight),
-      scrollSign: this.scrollSign,
-      scale: viewport.scale,
-      cachedScaleOf: (pageNo) => this.canvasCache.peek(pageNo)?.scale ?? null,
-    };
-    const candidates: { pageNo: number; priority: number }[] = [];
-    for (let p = prefetch.first; p <= prefetch.last; p += 1) {
-      const state = this.states.get(p);
-      if (state?.state === "ready" && state.scale === viewport.scale) continue;
-      if (state?.state === "error" && !this.retryable.has(p)) continue;
-      if (this.inFlight.has(p)) continue;
-      const box = this.boxes[p - 1];
-      if (box === undefined) continue;
-      candidates.push({ pageNo: p, priority: pageScore(box, ctx) });
-    }
-    candidates.sort((a, b) => a.priority - b.priority);
-
-    // 3) 在并发上限内启动渲染（占位在 startRender 第一行完成，故上限覆盖 getPage 阶段）
-    for (const candidate of candidates) {
+    if (!this.doc || this.disposed) return;
+    for (const tile of this.wanted) {
       if (this.inFlight.size >= this.budget.maxConcurrent) break;
-      void this.startRender(candidate.pageNo, viewport.scale, visible.has(candidate.pageNo));
+      if (this.bitmaps.peek(tile.key) || this.inFlight.has(tile.key) || this.errors.has(tile.pageNo)) continue;
+      if (!tile.visible && this.finishedPrefetch.has(tile.key)) continue;
+      void this.render(this.doc, tile);
     }
-
-    this.evictAndEmit(visible);
+    this.publish();
   }
 
-  private async startRender(pageNo: number, scale: number, isVisible: boolean): Promise<void> {
-    const doc = this.doc;
-    if (doc === null) return;
-
-    const version = (this.scheduleVersion.get(pageNo) ?? 0) + 1;
-    this.scheduleVersion.set(pageNo, version);
-    this.inFlight.set(pageNo, null);
-    this.patch(pageNo, { state: "queued" });
-    this.emit();
-
+  private async render(doc: DocumentHandle, tile: TileSpec): Promise<void> {
+    const job: { cancel?: RenderTaskHandle["cancel"] } = {};
+    this.inFlight.set(tile.key, job);
+    const current = () => this.inFlight.get(tile.key) === job;
     try {
-      const page: PageHandle = await doc.getPage(pageNo);
-      if (!this.isCurrent(pageNo, version)) return;
-
-      // 文本内容优先（文本层可先于位图出现，选择与搜索不受渲染影响）。
-      const text = await this.getTextContent(pageNo);
-      if (!this.isCurrent(pageNo, version)) return;
-      this.patch(pageNo, { textContent: text });
-
-      const cached = this.canvasCache.get(pageNo);
-      if (cached !== undefined && cached.scale === scale) {
-        this.releaseSlot(pageNo, version);
-        this.patch(pageNo, { state: "ready", canvas: cached.canvas, scale });
-        this.emit();
-        return;
-      }
-
-      const task = page.render({ scale });
-      this.inFlight.set(pageNo, task);
-      this.patch(pageNo, { state: "rendering" });
-      this.emit();
-
+      const page = await doc.getPage(tile.pageNo);
+      if (!current()) return;
+      const task = page.render({ scale: tile.scale, pixelRatio: tile.pixelRatio, clipBox: tile.clip });
+      job.cancel = () => task.cancel();
       const canvas = await task.promise;
-      this.releaseSlot(pageNo, version);
-
-      const bytes = canvasBytes(page.geometry.widthPt, page.geometry.heightPt, scale, DPR);
-      this.canvasCache.set(pageNo, { canvas, scale }, bytes);
-      this.retryable.delete(pageNo);
-      this.patch(pageNo, { state: "ready", canvas, scale, error: null });
-      this.emit();
-
-      // 渲染完成后若视口已变化，继续按新视口调度。
-      this.pump();
+      if (!current()) return;
+      const width = tile.clip?.w ?? Math.ceil(page.geometry.widthPt * tile.scale * tile.pixelRatio);
+      const height = tile.clip?.h ?? Math.ceil(page.geometry.heightPt * tile.scale * tile.pixelRatio);
+      this.bitmaps.set(tile.key, { ...tile, canvas }, width * height * 4);
+      this.finishedPrefetch.add(tile.key);
     } catch (err) {
-      const stillCurrent = this.isCurrent(pageNo, version);
-      this.releaseSlot(pageNo, version);
-      // 已被取消或已被新的调度接管：状态由新的那一次负责，这里不能再写。
-      if (!stillCurrent) return;
-      const code = (err as { code?: string }).code ?? "E_INTERNAL";
-      if (code === "E_CANCELED") {
-        // 取消不是失败：回到 idle，等待重新调度。
-        this.patch(pageNo, { state: "idle" });
-      } else {
-        this.patch(pageNo, {
-          state: "error",
-          error: { code, message: (err as Error).message },
-        });
+      if (current()) {
+        const code = (err as { code?: string }).code ?? "E_INTERNAL";
+        this.errors.set(tile.pageNo, { code, message: String(err) });
       }
-      this.emit();
-      if (isVisible) console.warn(`页面 ${pageNo} 渲染失败`, err);
+    } finally {
+      if (current()) {
+        this.inFlight.delete(tile.key);
+        this.pump();
+      }
     }
   }
 
-  private isCurrent(pageNo: number, version: number): boolean {
-    return this.scheduleVersion.get(pageNo) === version;
-  }
-
-  /// 归还占位：只有当前这次调度才有权清理，免得把后来者的占位删掉。
-  private releaseSlot(pageNo: number, version: number): void {
-    if (!this.isCurrent(pageNo, version)) return;
-    this.inFlight.delete(pageNo);
-  }
-
-  private evictAndEmit(protect: Set<number>): void {
-    for (const pageNo of this.inFlight.keys()) protect.add(pageNo);
-    for (const evictedKey of this.canvasCache.evict(protect)) {
-      this.patch(evictedKey, { canvas: null, state: "idle" });
+  private publish(): void {
+    const plans = new Map<number, TileSpec[]>();
+    for (const tile of this.wanted) {
+      const group = plans.get(tile.pageNo);
+      if (group) group.push(tile);
+      else plans.set(tile.pageNo, [tile]);
     }
-    this.emit();
+    const protectedKeys = new Set<string>();
+    const next = new Map<number, PageRenderState>();
+    for (const [pageNo, group] of plans) {
+      const old = this.states.get(pageNo);
+      const fresh: TileBitmap[] = [];
+      const missing: TileSpec[] = [];
+      for (const spec of group) {
+        const bitmap = this.bitmaps.peek(spec.key);
+        if (bitmap) {
+          fresh.push(bitmap);
+          if (spec.visible) protectedKeys.add(spec.key);
+        } else if (spec.visible) missing.push(spec);
+      }
+      // A visible region is kept at its previous resolution until its new tiles arrive.
+      const fallback = old?.tiles.filter(t =>
+        (t.scale !== group[0]!.scale || t.pixelRatio !== group[0]!.pixelRatio) &&
+        missing.some(m => intersects(t.bounds, m.bounds))) ?? [];
+      for (const t of fallback) protectedKeys.add(t.key);
+      const tiles = [...fallback, ...fresh];
+      const error = this.errors.get(pageNo) ?? null;
+      const state = error ? "error" : missing.length || !tiles.length ? "rendering" : "ready";
+      next.set(pageNo, { pageNo, error, state, tiles, scale: group[0]!.scale,
+        canvas: tiles.length === 1 && !tiles[0]!.clip ? tiles[0]!.canvas : null });
+    }
+
+    const evicted = new Set(this.bitmaps.evict(protectedKeys));
+    let changed = false;
+    for (const [pageNo, state] of next) {
+      if (evicted.size) {
+        state.tiles = state.tiles.filter(t => !evicted.has(t.key));
+        if (!state.tiles.length) {
+          state.canvas = null;
+          if (!state.error) state.state = "idle";
+        }
+      }
+      const old = this.states.get(pageNo);
+      if (old && state.state === old.state && state.scale === old.scale && state.error === old.error &&
+          state.tiles.length === old.tiles.length && state.tiles.every((t, i) => t === old.tiles[i])) continue;
+      this.states.set(pageNo, state);
+      changed = true;
+    }
+    for (const pageNo of this.states.keys()) {
+      if (!next.has(pageNo)) {
+        this.states.delete(pageNo);
+        changed = true;
+      }
+    }
+    if (changed) for (const cb of this.listeners) cb(this.states);
   }
 }
 

@@ -40,6 +40,8 @@ export interface PdfMetadata {
 export interface RenderRequest {
   scale: number;
   backgroundColor?: string;
+  pixelRatio?: number;
+  /// Rectangle in device pixels, relative to the top-left of the rotated viewport.
   clipBox?: { x: number; y: number; w: number; h: number };
 }
 

@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
+import brandIcon from "../../src-tauri/icons/128x128.png";
 import { CMD } from "../contracts/cmd";
 import { EVT } from "../contracts/evt";
 import type { DocumentDto, LibraryRootDto, ReadMode, TextState } from "../contracts/types";
@@ -445,11 +446,11 @@ export function AppShell(): ReactElement {
           把阅读高度完整让给页面；返回主页由阅读器内的返回按钮与 Esc 承担。 */}
       {route !== "reader" ? (
         <header className="lg-header">
-          <strong className="lg-brand">Legere</strong>
-          <nav className="lg-nav">
-            <button type="button" onClick={() => openRoute("home")} className={route === "home" ? "is-active" : ""}>主页</button>
-            <button type="button" onClick={() => openRoute("library")} className={route === "library" ? "is-active" : ""}>文献库</button>
-            <button type="button" onClick={() => openRoute("settings")} className={route === "settings" ? "is-active" : ""}>设置</button>
+          <strong className="lg-brand"><img src={brandIcon} width="32" height="32" alt="" />Legere</strong>
+          <nav className="lg-nav" aria-label="工作区">
+            <button type="button" onClick={() => openRoute("home")} aria-current={route === "home" ? "page" : undefined} className={route === "home" ? "is-active" : ""}>主页</button>
+            <button type="button" onClick={() => openRoute("library")} aria-current={route === "library" ? "page" : undefined} className={route === "library" ? "is-active" : ""}>文献库</button>
+            <button type="button" onClick={() => openRoute("settings")} aria-current={route === "settings" ? "page" : undefined} className={route === "settings" ? "is-active" : ""}>设置</button>
           </nav>
           {indexing !== null && indexing.total > 0 ? (
             <span className="lg-progress" title="索引进度">

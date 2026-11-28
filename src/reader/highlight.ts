@@ -59,7 +59,10 @@ export function mountHighlights(
       box.style.width = `${rect.width}px`;
       box.style.height = `${rect.height}px`;
       box.style.background = isActive ? "var(--lg-hit-active-bg)" : "var(--lg-hit-bg)";
-      if (isActive) box.style.outline = "1px solid var(--lg-hit-active-border)";
+      if (isActive) {
+        box.dataset.activeHit = "";
+        box.style.outline = "1px solid var(--lg-hit-active-border)";
+      }
       layer.appendChild(box);
     }
   });

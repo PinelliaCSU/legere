@@ -27,11 +27,11 @@ export function mountTextLayer(
   container.style.userSelect = "text";
 
   const frag = document.createDocumentFragment();
-  content.items.forEach((item: TextItem) => {
+  content.items.forEach((item: TextItem, index) => {
     if (item.str.trim().length === 0) return;
     const span = document.createElement("span");
     span.textContent = item.str;
-    span.dataset.offset = String(content.itemStarts[content.items.indexOf(item)] ?? 0);
+    span.dataset.offset = String(content.itemStarts[index] ?? 0);
     span.style.position = "absolute";
     // pdfjs 的 y 是基线坐标（自下而上），CSS 用顶部坐标（自上而下）。
     span.style.left = `${item.x * scale}px`;

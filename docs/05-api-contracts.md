@@ -308,7 +308,8 @@ export interface PageGeometry { widthPt: number; heightPt: number; rotation: 0 |
 export interface RenderRequest {
   scale: number;                // 与 devicePixelRatio 相乘在 engine 内部完成
   backgroundColor?: string;
-  clipBox?: { x: number; y: number; w: number; h: number };
+  pixelRatio?: number;           // 默认为当前设备像素比
+  clipBox?: { x: number; y: number; w: number; h: number }; // 旋转后视口左上角起算的设备像素
 }
 
 export interface RenderTaskHandle {
@@ -334,20 +335,19 @@ export type PageState = "idle" | "queued" | "rendering" | "ready" | "error";
 export interface PageRenderState {
   pageNo: number; state: PageState;
   canvas: HTMLCanvasElement | null;
-  textContent: TextContentHandle | null;
-  // canvas 位图实际渲染所用的 scale；**允许**与当前 ViewportState.scale 不同，
-  // 此时视为 LOD 预览（旧 scale 位图先顶上，清晰图随后替换）。消费方不得据此判定"渲染失败"。
+  tiles: TileBitmap[]; // 按绘制次序，每块携带 canvas、实际比例及相对页面的位置和大小
+  // scale 为当前请求比例。过渡期间可同时显示旧比例和新比例的块。
   scale: number | null;
   error: ApiError | null;
 }
 
 export type ViewportState = {
   scale: number;
-  scrollTop: number; viewportHeight: number; viewportWidth: number;
+  scrollTop: number; scrollLeft?: number; pixelRatio?: number; viewportHeight: number; viewportWidth: number;
   pageGeometries: PageGeometry[];   // index 0 = page 1
 } & ({ mode: "continuous" } | { mode: "single"; currentPage: number });
 
-// 默认值（契约值，可被 setBudget 覆盖）：maxConcurrent 2、cacheBytes 268435456(256 MiB)、prefetchPages 2
+// 默认值可被 setBudget 覆盖：maxConcurrent 3、cacheBytes 268435456(256 MiB)、prefetchPages 1
 export interface RenderBudget { maxConcurrent: number; cacheBytes: number; prefetchPages: number }
 
 export interface RenderScheduler {
@@ -359,7 +359,7 @@ export interface RenderScheduler {
   getPageState(pageNo: number): PageRenderState | undefined;
   retry(pageNo: number): void;      // 单页失败后的显式重试（失败页默认不再自动入队）
   subscribe(cb: (states: ReadonlyMap<number, PageRenderState>) => void): () => void;
-  // v0.13 增补（R25）：文本提取的唯一入口。渲染、文本层与文内搜索共用同一份
+  // 文本提取的唯一入口。选字、预取与文内搜索共用同一份
   // 字节预算 LRU 与在途去重；调用方不得再自己 getPage + getTextContent。
   getTextContent(pageNo: number): Promise<TextContentHandle>;
   // v0.13 增补（R25）：批量预热文本（搜索扫描、空闲预取），并发夹取到 [1,4]，

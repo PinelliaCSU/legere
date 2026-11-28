@@ -5,11 +5,11 @@ export interface LruEntry<V> {
   bytes: number;
 }
 
-export class BoundedLru<V> {
-  private readonly map = new Map<number, LruEntry<V>>();
+export class BoundedLru<V, K = number> {
+  private readonly map = new Map<K, LruEntry<V>>();
   private usedBytes = 0;
 
-  constructor(private readonly budgetBytes: number) {}
+  constructor(public budgetBytes: number) {}
 
   get size(): number {
     return this.map.size;
@@ -19,7 +19,7 @@ export class BoundedLru<V> {
     return this.usedBytes;
   }
 
-  get(key: number): V | undefined {
+  get(key: K): V | undefined {
     const entry = this.map.get(key);
     if (entry === undefined) return undefined;
     // 触碰即刷新顺序（Map 保持插入顺序）。
@@ -28,11 +28,11 @@ export class BoundedLru<V> {
     return entry.value;
   }
 
-  peek(key: number): V | undefined {
+  peek(key: K): V | undefined {
     return this.map.get(key)?.value;
   }
 
-  set(key: number, value: V, bytes: number): void {
+  set(key: K, value: V, bytes: number): void {
     const existing = this.map.get(key);
     if (existing !== undefined) {
       this.usedBytes -= existing.bytes;
@@ -43,10 +43,10 @@ export class BoundedLru<V> {
   }
 
   /// 逐出直到满足预算；受保护的 key 不逐出（返回被逐出的 key 列表）。
-  evict(protectedKeys: ReadonlySet<number>): number[] {
-    const evicted: number[] = [];
+  evict(protectedKeys: ReadonlySet<K> = new Set()): K[] {
+    const evicted: K[] = [];
     if (this.usedBytes <= this.budgetBytes) return evicted;
-    for (const [key, entry] of [...this.map.entries()]) {
+    for (const [key, entry] of this.map) {
       if (this.usedBytes <= this.budgetBytes) break;
       if (protectedKeys.has(key)) continue;
       this.map.delete(key);
@@ -56,7 +56,7 @@ export class BoundedLru<V> {
     return evicted;
   }
 
-  delete(key: number): boolean {
+  delete(key: K): boolean {
     const entry = this.map.get(key);
     if (entry === undefined) return false;
     this.map.delete(key);
@@ -69,7 +69,7 @@ export class BoundedLru<V> {
     this.usedBytes = 0;
   }
 
-  keys(): number[] {
+  keys(): K[] {
     return [...this.map.keys()];
   }
 }

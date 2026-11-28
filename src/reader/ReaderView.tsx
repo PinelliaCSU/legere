@@ -42,7 +42,7 @@ import { BookmarkDrawer } from "./BookmarkDrawer";
 import { OutlineDrawer } from "./OutlineDrawer";
 import { mountHighlights } from "./highlight";
 import { createIndexYield } from "./index-yield";
-import { findInPage, snippetAt, type DocSearchHit } from "./search/doc-search";
+import { createSearchTextCache, scanFromOrigin, stepOccurrence, type DocSearchHit, type SearchCursor } from "./search/doc-search";
 import { mountTextLayer, type MountedTextLayer } from "./text-layer";
 import {
   MAX_SCALE,
@@ -80,6 +80,27 @@ const GEO_BATCH = 20;
 /// 命中页列表一次最多渲染多少条：1200 页的文档可能有上千个命中页，
 /// 全量塞进 DOM 只会让搜索条变成一条几万像素的长条（命中总数仍然如实显示）。
 const MAX_HITS_SHOWN = 60;
+const EMPTY_RANGES: [number, number][] = [];
+
+function visibleSearchTop(reader: HTMLElement): number {
+  const bar = reader.querySelector(".lg-docsearch");
+  return Math.max(reader.getBoundingClientRect().top, bar?.getBoundingClientRect().bottom ?? 0);
+}
+
+function searchOrigin(reader: HTMLElement, scale: number) {
+  const pages = reader.querySelector(".lg-pages")?.children;
+  if (!pages?.length) return { pageNo: 1, topY: Infinity };
+  const top = visibleSearchTop(reader);
+  let low = 0;
+  let high = pages.length - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (pages[mid]!.getBoundingClientRect().bottom <= top) low = mid + 1;
+    else high = mid;
+  }
+  const page = pages[low]!;
+  return { pageNo: Number(page.getAttribute("data-page")), topY: (page.getBoundingClientRect().bottom - top) / scale };
+}
 
 function errorText(code: string | null): string {
   if (code === null) return "";
@@ -96,6 +117,7 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
   const [preloadDocMax, setPreloadDocMax] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [doc, setDoc] = useState<DocumentHandle | null>(null);
+  const searchTextCache = useMemo(createSearchTextCache, [doc]);
   const [geos, setGeos] = useState<PageGeometry[]>([]);
   const [mode, setMode] = useState<ReadMode>("continuous");
   const [scale, setScale] = useState(1);
@@ -107,7 +129,11 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<DocSearchHit[]>([]);
-  const [activeHit, setActiveHit] = useState(0);
+  const [activeHit, setActiveHit] = useState<SearchCursor | null>(null);
+  const pendingReveal = useRef<SearchCursor | null>(null);
+  const searchRun = useRef(0);
+  const [submitted, setSubmitted] = useState("");
+  const [searchFailed, setSearchFailed] = useState(false);
   const [searching, setSearching] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [outline, setOutline] = useState<{ title: string; pageNo: number | null }[]>([]);
@@ -122,6 +148,25 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   /// 全屏阅读（F11 / 面板项）。
   const [fullscreen, setFullscreen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const panel = menuRef.current;
+    if (!menuOpen || !menuPos || !panel) return;
+    const position = () => {
+      panel.style.left = Math.max(8, Math.min(menuPos.x, window.innerWidth - panel.offsetWidth - 8)) + "px";
+      panel.style.top = Math.max(8, Math.min(menuPos.y, window.innerHeight - panel.offsetHeight - 8)) + "px";
+    };
+    position();
+    const observer = new ResizeObserver(position);
+    observer.observe(panel);
+    window.addEventListener("resize", position);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", position);
+      panel.style.removeProperty("left");
+      panel.style.removeProperty("top");
+    };
+  }, [menuOpen, menuPos]);
   const jumpRef = useRef<HTMLInputElement | null>(null);
   /// 面板里的「跳页」输入（长文档没有内置目录时，这是唯一能直达的办法）。
   const [jumpInput, setJumpInput] = useState("");
@@ -139,6 +184,13 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
     setDoc(null);
     setGeos([]);
     setHits([]);
+    setActiveHit(null);
+    pendingReveal.current = null;
+    setSearchOpen(false);
+    setSearching(false);
+    setQuery("");
+    setSubmitted("");
+    setSearchFailed(false);
     setOutline([]);
     setResumePage(null);
     setCurrentPage(1);
@@ -231,12 +283,13 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
 
     return () => {
       alive = false;
+      searchRun.current++;
     };
   }, [documentId, initialPage, reloadKey]);
 
   useEffect(() => () => void doc?.dispose(), [doc]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     scheduler.setDocument(doc);
     const unsubscribe = scheduler.subscribe((next) => setStates(new Map(next)));
     return () => {
@@ -245,7 +298,7 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
     };
   }, [doc, scheduler]);
 
-  useEffect(() => () => scheduler.dispose(), [scheduler]);
+  // The document effect releases jobs, caches and its subscription on unmount.
 
   // 性能设置（v0.13）：空闲文本预取默认关闭；文档常驻预加载 (待补充) 恒为 0。
   useEffect(() => {
@@ -289,7 +342,7 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
   // 视口发布 + 当前页：滚动只记位置，计算与调度合并到下一帧（docs/08 §8）。
   // 旧实现每个 scroll 事件都直接 setViewport + 重算当前页：60Hz 滚动 = 每秒 60 次
   // O(页数) 的盒子重算 + 60 次全量状态 Map 拷贝，滚动的大头开销就在这里。
-  useEffect(() => {
+  useLayoutEffect(() => {
     const scroll = scrollRef.current;
     if (doc === null || scroll === null || geos.length === 0) return;
     let raf = 0;
@@ -300,7 +353,9 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
       scheduler.setViewport({
         ...(singlePage === null ? { mode: "continuous" } : { mode: "single", currentPage: singlePage }),
         scale,
-        scrollTop: el.scrollTop,
+        scrollTop: el.scrollTop - (el.querySelector<HTMLElement>(".lg-pages")?.offsetTop ?? READER_PADDING) + READER_PADDING,
+        scrollLeft: el.scrollLeft,
+        pixelRatio: window.devicePixelRatio || 1,
         viewportHeight: el.clientHeight,
         viewportWidth: el.clientWidth,
         pageGeometries: geos,
@@ -329,7 +384,7 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
       observer?.disconnect();
       window.removeEventListener("resize", schedule);
     };
-  }, [doc, geos, indexYield, pageBoxes, scale, scheduler, singlePage]);
+  }, [doc, geos, indexYield, pageBoxes, scale, scheduler, searchOpen, singlePage]);
 
   // 缩放锚点：保持当前页顶部仍在视口顶部（否则一缩放就跳回开头）。
   const prevScale = useRef(scale);
@@ -493,64 +548,98 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
   /// 文本统一走 scheduler.getTextContent（P0-3）：与渲染/文本层共用同一份字节预算 LRU，
   /// 第二次同样的搜索不再重新解析；也不再一次性把整本 300 页文本攒进数组。
   /// 可取消：切文档 / 关面板后，旧一轮的结果不再写回 state。
-  const searchRun = useRef(0);
-  const runSearch = useCallback(
-    async (raw: string) => {
-      const runId = searchRun.current + 1;
-      searchRun.current = runId;
-      if (doc === null || raw.trim().length === 0) {
-        setHits([]);
-        return;
-      }
-      setSearching(true);
-      try {
-        const found: DocSearchHit[] = [];
-        for (let p = 1; p <= doc.pageCount; p += 1) {
-          if (searchRun.current !== runId) return;
-          const content = await scheduler.getTextContent(p);
-          const ranges = findInPage(content.text, raw);
-          const first = ranges[0];
-          if (first === undefined) continue;
-          found.push({ pageNo: p, ranges, snippet: snippetAt(content.text, first[0], first[1]) });
-        }
-        if (searchRun.current !== runId) return;
-        setHits(found);
-        activeHitRef.current = 0;
-        setActiveHit(0);
-        const hit = found[0];
-        if (hit !== undefined) goToPage(hit.pageNo);
-      } finally {
-        if (searchRun.current === runId) setSearching(false);
-      }
-    },
-    [doc, goToPage, scheduler],
-  );
-
-  const closeSearch = useCallback(() => {
-    searchRun.current += 1;
+  const resetSearch = useCallback(() => {
+    searchRun.current++;
+    pendingReveal.current = null;
+    setActiveHit(null);
+    setHits([]);
+    setSubmitted("");
     setSearching(false);
-    setSearchOpen(false);
+    setSearchFailed(false);
   }, []);
 
-  /// 在全部命中之间前后移动：结果列表只渲染前 MAX_HITS_SHOWN 条，
-  /// 上千命中页必须能靠这两个按钮走下去，否则后面的命中根本点不到。
-  /// 用 ref 记录当前位置：连点时 state 还没提交，闭包里的 activeHit 会是旧值。
-  const activeHitRef = useRef(0);
-  useEffect(() => {
-    activeHitRef.current = activeHit;
-  }, [activeHit]);
-  const stepHit = useCallback(
-    (delta: 1 | -1) => {
-      if (hits.length === 0) return;
-      const next = Math.min(Math.max(0, activeHitRef.current + delta), hits.length - 1);
-      const hit = hits[next];
-      if (hit === undefined) return;
-      activeHitRef.current = next;
-      setActiveHit(next);
-      goToPage(hit.pageNo);
-    },
-    [goToPage, hits],
-  );
+  const selectHit = useCallback((cursor: SearchCursor) => {
+    pendingReveal.current = cursor;
+    setResumePage(null);
+    setActiveHit(cursor);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (mode === "single" && activeHit && pendingReveal.current === activeHit) setCurrentPage(activeHit.pageNo);
+  }, [mode, activeHit]);
+
+  const runSearch = async () => {
+    resetSearch();
+    const reader = scrollRef.current;
+    if (!doc || !reader || !query.trim()) return;
+    const run = searchRun.current;
+    const cancelled = () => searchRun.current !== run;
+    const origin = searchOrigin(reader, scale);
+    setSubmitted(query);
+    setSearching(true);
+    const found: DocSearchHit[] = [];
+    let selected = false;
+    let lastUpdate = performance.now();
+    try {
+      for await (const { page, firstAhead } of scanFromOrigin(doc.pageCount, origin, query, requestText, cancelled, searchTextCache)) {
+        if (cancelled()) return;
+        found.push(page);
+        if (!selected && firstAhead >= 0) {
+          selected = true;
+          setHits([...found]);
+          selectHit({ pageNo: page.pageNo, rangeIndex: firstAhead });
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+        } else if (selected && performance.now() - lastUpdate >= 32) {
+          setHits([...found]);
+          lastUpdate = performance.now();
+        }
+      }
+      if (cancelled()) return;
+      setHits(found);
+      if (!selected && found[0]) selectHit({ pageNo: found[0].pageNo, rangeIndex: 0 });
+    } catch {
+      if (!cancelled()) {
+        setHits(found);
+        setSearchFailed(true);
+      }
+    } finally {
+      if (!cancelled()) setSearching(false);
+    }
+  };
+
+  const closeSearch = useCallback(() => {
+    resetSearch();
+    setSearchOpen(false);
+  }, [resetSearch]);
+
+  const stepHit = (delta: 1 | -1) => {
+    const cursor = pendingReveal.current ?? activeHit;
+    if (cursor) selectHit(stepOccurrence(hits, cursor, delta));
+  };
+
+  const revealHighlight = useCallback((cursor: SearchCursor, boxes: DOMRect[]) => {
+    const reader = scrollRef.current;
+    if (!reader || pendingReveal.current !== cursor) return;
+    pendingReveal.current = null;
+    const first = boxes[0];
+    if (!first) return;
+    const viewport = reader.getBoundingClientRect();
+    const top = visibleSearchTop(reader);
+    // Include both lines of a wrapped phrase, keeping its first line in view for very long matches.
+    const bounds = boxes.reduce((r, b) => ({
+      top: Math.min(r.top, b.top), bottom: Math.max(r.bottom, b.bottom),
+      left: Math.min(r.left, b.left), right: Math.max(r.right, b.right),
+    }), { top: first.top, bottom: first.bottom, left: first.left, right: first.right });
+    const height = viewport.bottom - top;
+    if (bounds.top < top || bounds.bottom > viewport.bottom) {
+      const margin = Math.max(0, (height - (bounds.bottom - bounds.top)) / 3);
+      reader.scrollTop += bounds.top - top - margin;
+    }
+    if (bounds.left < viewport.left || bounds.right > viewport.right) {
+      const left = bounds.right - bounds.left > reader.clientWidth ? first.left : bounds.left;
+      reader.scrollLeft += left - viewport.left;
+    }
+  }, []);
 
   // 键盘：Ctrl+F 文内搜索，Ctrl± 缩放，翻页/模式/退出
   useEffect(() => {
@@ -584,6 +673,7 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
       if (e.key.toLowerCase() === "m") setMode((m) => (m === "continuous" ? "single" : "continuous"));
       // 空格翻页：阅读器里最顺手的一个键（Shift+空格 回退）。
       if (e.key === " " || e.code === "Space") {
+        if (target instanceof Element && target.closest("button, summary")) return;
         e.preventDefault();
         goToPage(currentPage + (e.shiftKey ? -1 : 1));
         return;
@@ -617,13 +707,7 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
       const target = event.target;
       if (target instanceof Element && target.closest("input, textarea, select") !== null) return;
       event.preventDefault();
-      // 面板尺寸与 CSS 的 min-width(216) + 内容高度对齐；贴边时向内收，避免被裁。
-      const width = 232;
-      const height = 330;
-      setMenuPos({
-        x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
-        y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
-      });
+      setMenuPos({ x: event.clientX, y: event.clientY });
       setMenuOpen(true);
     };
     host.addEventListener("contextmenu", onContextMenu);
@@ -725,8 +809,10 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
     return Array.from({ length: geos.length }, (_, i) => i + 1);
   }, [geos.length, mode, currentPage]);
 
-  const activeHitPage = hits[activeHit]?.pageNo;
-  const activeRanges = hits[activeHit]?.ranges ?? [];
+  const activePage = hits.find((page) => page.pageNo === activeHit?.pageNo);
+  const hitCount = hits.reduce((sum, page) => sum + page.ranges.length, 0);
+  const ordinal = activeHit === null ? 0 : activeHit.rangeIndex + 1 +
+    hits.reduce((sum, page) => sum + (page.pageNo < activeHit.pageNo ? page.ranges.length : 0), 0);
 
   return (
     <div
@@ -763,34 +849,36 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
             autoFocus
             placeholder="在本文中搜索，回车执行"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              resetSearch();
+              setQuery(e.target.value);
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") void runSearch(query);
-              if (e.key === "Escape") closeSearch();
+              if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+              e.preventDefault();
+              if (!submitted || searchFailed) void runSearch();
+              else stepHit(e.shiftKey ? -1 : 1);
             }}
           />
           <span className="lg-muted">
-            {searching ? "搜索中…" : hits.length > 0 ? hits.reduce((n, h) => n + h.ranges.length, 0) + " 处命中" : query.length > 0 ? "未找到「" + query + "」" : ""}
+            {searchFailed ? "搜索中断，回车重试" : searching ? "搜索中…" : submitted && !hitCount ? "未找到「" + submitted + "」" : ""}
           </span>
-          {hits.length > 0 ? (
+          {activeHit ? (
             <>
-              <button type="button" className="lg-btn" title="上一个命中" onClick={() => stepHit(-1)}>上一页</button>
-              <button type="button" className="lg-btn" title="下一个命中" onClick={() => stepHit(1)}>下一页</button>
-              <span className="lg-muted">{activeHit + 1}/{hits.length}</span>
+              <button type="button" className="lg-btn" title="上一个命中（Shift+Enter）" onClick={() => stepHit(-1)}>上一处</button>
+              <button type="button" className="lg-btn" title="下一个命中（Enter）" onClick={() => stepHit(1)}>下一处</button>
+              <span className="lg-muted">{ordinal}/{hitCount} 处</span>
             </>
           ) : null}
           <button type="button" className="lg-btn" onClick={closeSearch}>关闭</button>
           {hits.length > 0 ? (
             <ul className="lg-docsearch-list">
-              {hits.slice(0, MAX_HITS_SHOWN).map((hit, index) => (
+              {hits.slice(0, MAX_HITS_SHOWN).map((hit) => (
                 <li key={hit.pageNo}>
                   <button
                     type="button"
-                    className={index === activeHit ? "is-active" : ""}
-                    onClick={() => {
-                      setActiveHit(index);
-                      goToPage(hit.pageNo);
-                    }}
+                    className={hit.pageNo === activeHit?.pageNo ? "is-active" : ""}
+                    onClick={() => selectHit({ pageNo: hit.pageNo, rangeIndex: 0 })}
                   >
                     p{hit.pageNo} · {hit.ranges.length} 处 · {hit.snippet.slice(0, 40)}
                   </button>
@@ -813,7 +901,9 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
               geometry={geo}
               scale={scale}
               state={states.get(pageNo)}
-              highlights={pageNo === activeHitPage ? activeRanges : []}
+              highlights={pageNo === activePage?.pageNo ? activePage.ranges : EMPTY_RANGES}
+              cursor={activeHit?.pageNo === pageNo ? activeHit : null}
+              revealHighlight={revealHighlight}
               mountText={Math.abs(pageNo - currentPage) <= 2}
               onRetry={() => scheduler.retry(pageNo)}
             />
@@ -821,52 +911,42 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
         })}
       </div>
 
-      {/* 无工具栏（D15）：返回入口只有这一个浮动按钮，不占用阅读高度。 */}
-      <button type="button" className="lg-float-btn lg-float-back" title="返回主页" onClick={onExit}>
-        ‹
+      <button type="button" className="lg-reader-back" title="返回主页" onClick={onExit}>
+        <span className="lg-arrow lg-arrow-back" aria-hidden="true" />主页
       </button>
-
-      <button
-        type="button"
-        className="lg-float-btn lg-float-left"
-        title="上一页"
-        onClick={() => goToPage(currentPage - 1)}
-      >
-        ‹
-      </button>
-      <button
-        type="button"
-        className="lg-float-btn lg-float-right"
-        title="下一页"
-        onClick={() => goToPage(currentPage + 1)}
-      >
-        ›
-      </button>
-
-      {/* 阅读选项统一收进一个可隐藏的入口（本轮需求 1）：默认收起，收起时不占任何版面。
-          页码胶囊是状态指示（D16），不是选项，留在原位。 */}
-      <button
-        type="button"
-        className={"lg-reader-menu-btn" + (menuOpen ? " is-open" : "")}
-        title="阅读选项（缩放 / 模式 / 目录 / 书签）"
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        aria-controls="lg-reader-menu"
-        onClick={() => {
-          setMenuPos(null);
-          setMenuOpen((open) => !open);
-        }}
-      >
-        ⋯
-      </button>
+      <div className="lg-reader-dock" role="group" aria-label="阅读导航">
+        <button type="button" title="上一页" aria-label="上一页" disabled={!doc || currentPage <= 1}
+          onClick={() => goToPage(currentPage - 1)}>
+          <span className="lg-arrow" aria-hidden="true" />
+        </button>
+        {doc ? (
+          <button type="button" className="lg-page-capsule" title="跳页" aria-label={`第 ${currentPage} 页，共 ${doc.pageCount} 页，跳页`}
+            onClick={() => {
+              setMenuPos(null);
+              setMenuOpen(true);
+              window.requestAnimationFrame(() => jumpRef.current?.focus());
+            }}>
+            <b>{currentPage}</b><span aria-hidden="true">/</span>{doc.pageCount}
+          </button>
+        ) : null}
+        <button type="button" title="下一页" aria-label="下一页" disabled={!doc || currentPage >= doc.pageCount}
+          onClick={() => goToPage(currentPage + 1)}>
+          <span className="lg-arrow lg-arrow-next" aria-hidden="true" />
+        </button>
+        <button type="button" className="lg-reader-menu-btn" title="阅读选项" aria-label="阅读选项"
+          aria-haspopup="menu" aria-expanded={menuOpen} aria-controls="lg-reader-menu"
+          onClick={() => { setMenuPos(null); setMenuOpen((open) => !open); }}>
+          <span className="lg-more-dots" aria-hidden="true" />
+        </button>
+      </div>
 
       {menuOpen ? (
         <div
-          className="lg-reader-menu"
+          className={"lg-reader-menu" + (menuPos ? " at-pointer" : "")}
           id="lg-reader-menu"
           role="menu"
           aria-label="阅读选项"
-          style={menuPos === null ? undefined : { left: menuPos.x, top: menuPos.y, right: "auto", bottom: "auto" }}
+          ref={menuRef}
         >
           <div className="lg-reader-menu-row">
             <span className="lg-reader-menu-label">缩放</span>
@@ -922,26 +1002,6 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
             type="button"
             role="menuitem"
             className="lg-reader-menu-item"
-            title="空闲时向前预取文本，让搜索更快（默认关闭）"
-            onClick={() => persistIdleTextPrefetch(nextIdleTextPrefetch(idleTextPages))}
-          >
-            空闲预取文本
-            <kbd>{formatIdleTextPrefetch(idleTextPages)}</kbd>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="lg-reader-menu-item"
-            disabled
-            title="(待补充) 产品参数未定：常驻几本 / 内存上限"
-          >
-            预加载下一篇
-            <kbd>{preloadDocMax <= 0 ? "未启用" : preloadDocMax + " 篇"}</kbd>
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="lg-reader-menu-item"
             title="在本文中搜索（Ctrl+F）"
             onClick={() => {
               setSearchOpen(true);
@@ -981,6 +1041,29 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
             {fullscreen ? "退出全屏" : "全屏阅读"}
             <kbd>F11</kbd>
           </button>
+          <details className="lg-reader-performance">
+            <summary>性能选项</summary>
+            <button
+              type="button"
+              role="menuitem"
+              className="lg-reader-menu-item"
+              title="空闲时向前预取文本，让搜索更快（默认关闭）"
+              onClick={() => persistIdleTextPrefetch(nextIdleTextPrefetch(idleTextPages))}
+            >
+              空闲预取文本
+              <kbd>{formatIdleTextPrefetch(idleTextPages)}</kbd>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="lg-reader-menu-item"
+              disabled
+              title="(待补充) 产品参数未定：常驻几本 / 内存上限"
+            >
+              预加载下一篇
+              <kbd>{preloadDocMax <= 0 ? "未启用" : preloadDocMax + " 篇"}</kbd>
+            </button>
+          </details>
           <p className="lg-reader-menu-hint">Ctrl+滚轮可缩放</p>
         </div>
       ) : null}
@@ -988,22 +1071,9 @@ export function ReaderView({ documentId, initialPage, onExit, onProgress, onApiR
       {notice !== null ? <div className="lg-reader-notice">{notice}</div> : null}
 
       {(doc?.pageCount ?? 0) > 0 ? (
-        <>
-          <div className="lg-reader-progress" aria-hidden="true">
-            <span style={{ width: Math.round((currentPage / Math.max(1, doc?.pageCount ?? 1)) * 100) + "%" }} />
-          </div>
-          <button
-            type="button"
-            className="lg-page-capsule"
-            title="跳页"
-            onClick={() => {
-              setMenuOpen(true);
-              window.requestAnimationFrame(() => jumpRef.current?.focus());
-            }}
-          >
-            {currentPage} / {doc?.pageCount ?? geos.length}
-          </button>
-        </>
+        <div className="lg-reader-progress" aria-hidden="true">
+          <span style={{ width: Math.round((currentPage / Math.max(1, doc?.pageCount ?? 1)) * 100) + "%" }} />
+        </div>
       ) : null}
 
       {outlineOpen && outline.length > 0 ? (
@@ -1028,6 +1098,8 @@ interface PageSlotProps {
   scale: number;
   state: PageRenderState | undefined;
   highlights: [number, number][];
+  cursor: SearchCursor | null;
+  revealHighlight: (cursor: SearchCursor, boxes: DOMRect[]) => void;
   /// 是否挂文本层：只给当前页附近，避免一次打开发起 N 次 getTextContent（性能关键）。
   mountText: boolean;
   /// 取页文本：走调度器的共享缓存（P0-3），组件不再直接调用引擎。
@@ -1041,14 +1113,14 @@ function PageSlot({
   scale,
   state,
   highlights,
+  cursor,
+  revealHighlight,
   mountText,
   requestText,
   onRetry,
 }: PageSlotProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const textRef = useRef<MountedTextLayer | null>(null);
-  const highlightRef = useRef<(() => void) | null>(null);
-  const contentRef = useRef<TextContentHandle | null>(null);
   const mountedRef = useRef<{ content: TextContentHandle; scale: number; heightPt: number } | null>(null);
   const detachGuard = useRef<(() => void) | null>(null);
   const width = Math.round(geometry.widthPt * scale);
@@ -1066,7 +1138,6 @@ function PageSlot({
   const dropLayer = (): void => {
     textRef.current?.destroy();
     textRef.current = null;
-    contentRef.current = null;
     mountedRef.current = null;
   };
 
@@ -1094,7 +1165,7 @@ function PageSlot({
     let cancelled = false;
     void (async () => {
       try {
-        const content = state?.textContent ?? (await requestText(pageNo));
+        const content = await requestText(pageNo);
         if (cancelled) return;
         const mounted = mountedRef.current;
         // 同一份文本、同一比例已经挂好了就不再重挂：文本迟到或状态补丁会把节点整体换掉，
@@ -1114,7 +1185,6 @@ function PageSlot({
           dropLayer();
           return;
         }
-        contentRef.current = content;
         textRef.current?.destroy();
         textRef.current = mountTextLayer(host, content, scale, geometry.heightPt);
         mountedRef.current = { content, scale, heightPt: geometry.heightPt };
@@ -1125,7 +1195,7 @@ function PageSlot({
     return () => {
       cancelled = true;
     };
-  }, [pageNo, requestText, scale, geometry.heightPt, state?.textContent, mountText]);
+  }, [pageNo, requestText, scale, geometry.heightPt, mountText]);
 
   // 只有卸载（切页、换文档、退出阅读器）才真的销毁文本层；挂载/更新路径靠上面的判断复用旧层。
   useEffect(
@@ -1140,22 +1210,27 @@ function PageSlot({
   // 高亮：当前命中页的命中区间
   useEffect(() => {
     const host = hostRef.current;
-    highlightRef.current?.();
-    highlightRef.current = null;
-    const content = contentRef.current;
-    if (host === null || content === null || highlights.length === 0) return;
-    highlightRef.current = mountHighlights(host, content, highlights, 0, scale, geometry.heightPt);
+    if (!host || !cursor || !highlights.length) return;
+    let cancelled = false;
+    let unmount: (() => void) | undefined;
+    void requestText(pageNo).then((content) => {
+      if (cancelled) return;
+      unmount = mountHighlights(host, content, highlights, cursor.rangeIndex, scale, geometry.heightPt);
+      const boxes = host.querySelectorAll("[data-active-hit]");
+      revealHighlight(cursor, Array.from(boxes, (box) => box.getBoundingClientRect()));
+    }).catch((err) => console.warn("搜索高亮失败", pageNo, err));
     return () => {
-      highlightRef.current?.();
-      highlightRef.current = null;
+      cancelled = true;
+      unmount?.();
     };
-  }, [highlights, scale, geometry.heightPt, state?.textContent]);
+  }, [cursor, highlights, pageNo, requestText, scale, geometry.heightPt, revealHighlight]);
 
   return (
     <div className="lg-page" data-page={pageNo} ref={hostRef} style={{ width, height, marginBottom: PAGE_GAP }}>
-      {state?.canvas !== undefined && state.canvas !== null ? (
-        <CanvasHost canvas={state.canvas} />
-      ) : (
+      {state?.tiles.map(tile => (
+        <CanvasHost key={tile.key} canvas={tile.canvas} bounds={tile.bounds} />
+      ))}
+      {!state?.tiles.length || state.error ? (
         <div className="lg-page-placeholder">
           {state?.state === "error" ? (
             <>
@@ -1166,14 +1241,17 @@ function PageSlot({
             <span>加载中…</span>
           )}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
 
-function CanvasHost({ canvas }: { canvas: HTMLCanvasElement }): ReactElement {
+function CanvasHost({ canvas, bounds }: {
+  canvas: HTMLCanvasElement;
+  bounds: { x: number; y: number; w: number; h: number };
+}): ReactElement {
   const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const host = ref.current;
     if (host === null) return;
     host.appendChild(canvas);
@@ -1181,5 +1259,8 @@ function CanvasHost({ canvas }: { canvas: HTMLCanvasElement }): ReactElement {
       if (canvas.parentElement === host) host.removeChild(canvas);
     };
   }, [canvas]);
-  return <div className="lg-page-canvas" ref={ref} />;
+  return <div className="lg-page-canvas" ref={ref} style={{
+    left: bounds.x * 100 + "%", top: bounds.y * 100 + "%",
+    width: bounds.w * 100 + "%", height: bounds.h * 100 + "%",
+  }} />;
 }

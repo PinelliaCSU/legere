@@ -21,6 +21,9 @@ export function LastReadCard({ doc, now, onContinue }: LastReadCardProps): React
         {doc.title}
       </span>
       <span className="lg-lastread-meta">{lastReadMeta(doc, now)}</span>
+      {doc.progressPage !== null && doc.pageCount !== null && doc.pageCount > 0 ? (
+        <progress className="lg-lastread-progress" aria-label="阅读进度" value={doc.progressPage} max={doc.pageCount} />
+      ) : null}
       <span className="lg-lastread-actions">
         <button type="button" className="lg-btn lg-btn-primary" onClick={() => onContinue(doc.documentId)}>
           继续阅读
