@@ -10,6 +10,8 @@ import {
   PAGE_TONE_KEY,
   THEME_SOURCE_KEY,
   parsePageTone,
+  parseUiFontSize,
+  type UiFontSize,
   parseThemeSource,
   themeForSystem,
   type PageTone,
@@ -17,6 +19,10 @@ import {
 } from "./theme-prefs";
 
 interface ThemeContextValue {
+  fontSize: UiFontSize;
+  setFontSize: (size: UiFontSize) => void;
+  homePattern: boolean;
+  setHomePattern: (on: boolean) => void;
   theme: ThemeName;
   paperVeil: boolean;
   /// 主题来源：手动选，还是跟随系统的深/浅色。
@@ -33,6 +39,8 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: ReactNode }): ReactElement {
   // 默认 light（M13 §7.2 第 3 条占位值；跟随系统由 D13/T13 决定但首版先按已存取值为准）。
+  const [fontSize, setFontSizeState] = useState<UiFontSize>(100);
+  const [homePattern, setHomePatternState] = useState(true);
   const [theme, setThemeState] = useState<ThemeName>("light");
   const [paperVeil, setPaperVeilState] = useState(true);
   const [themeSource, setThemeSourceState] = useState<ThemeSource>("manual");
@@ -43,6 +51,8 @@ export function ThemeProvider({ children }: { children: ReactNode }): ReactEleme
     void (async () => {
       try {
         const all = await call(CMD.SETTINGS_GET_ALL, {});
+        setFontSizeState(parseUiFontSize(all["ui.fontSize"]));
+        setHomePatternState(all["ui.homePattern"] !== "false");
         const stored = all["ui.theme"];
         if (stored === "\"light\"" || stored === "\"dark\"" || stored === "\"paper\"") {
           setThemeState(stored.replace(/"/g, "") as ThemeName);
@@ -74,6 +84,22 @@ export function ThemeProvider({ children }: { children: ReactNode }): ReactEleme
       // 设置持久化失败不应打断使用（下次启动回默认值）。
     });
   }, []);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.fontSize = fontSize + "%";
+    root.style.setProperty("--lg-ui-scale", String(fontSize / 100));
+  }, [fontSize]);
+
+  const setFontSize = useCallback((size: UiFontSize) => {
+    setFontSizeState(size);
+    persist("ui.fontSize", String(size));
+  }, [persist]);
+
+  const setHomePattern = useCallback((on: boolean) => {
+    setHomePatternState(on);
+    persist("ui.homePattern", String(on));
+  }, [persist]);
 
   const setTheme = useCallback(
     (next: ThemeName) => {
@@ -119,8 +145,8 @@ export function ThemeProvider({ children }: { children: ReactNode }): ReactEleme
   }, [themeSource]);
 
   const value = useMemo(
-    () => ({ theme, paperVeil, themeSource, pageTone, setTheme, setPaperVeil, setThemeSource, setPageTone }),
-    [theme, paperVeil, themeSource, pageTone, setTheme, setPaperVeil, setThemeSource, setPageTone],
+    () => ({ theme, paperVeil, themeSource, pageTone, fontSize, setFontSize, homePattern, setHomePattern, setTheme, setPaperVeil, setThemeSource, setPageTone }),
+    [theme, paperVeil, themeSource, pageTone, fontSize, setFontSize, homePattern, setHomePattern, setTheme, setPaperVeil, setThemeSource, setPageTone],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;

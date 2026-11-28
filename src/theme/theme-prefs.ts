@@ -47,3 +47,10 @@ export function readerToneClass(theme: ThemeName, tone: PageTone): string {
   if (theme !== "dark" || tone === "off") return "";
   return tone === "dim" ? "tone-dim" : "tone-invert";
 }
+
+export const UI_FONT_SIZES = [90, 100, 115, 130, 150] as const;
+export type UiFontSize = (typeof UI_FONT_SIZES)[number];
+
+export function parseUiFontSize(raw: string | undefined): UiFontSize {
+  return UI_FONT_SIZES.find(size => String(size) === raw) ?? 100;
+}

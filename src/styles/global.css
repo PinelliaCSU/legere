@@ -30,6 +30,8 @@ body {
   color: var(--lg-fg-primary, #1b2430);
 }
 
+button, input, select, textarea { font-size: 0.833333rem; }
+
 /* ── 外壳 ── */
 .lg-shell { display: flex; flex-direction: column; height: 100%; width: 100%; overflow: hidden; }
 .lg-header {
@@ -38,7 +40,7 @@ body {
   background: var(--lg-bg-surface);
 }
 .lg-brand {
-  display: inline-flex; align-items: center; gap: 9px; font: 600 24px/1 var(--lg-display-font); letter-spacing: -0.045em;
+  display: inline-flex; align-items: center; gap: 9px; font: 600 1.5rem/1 var(--lg-display-font); letter-spacing: -0.045em;
 }
 .lg-brand img { border-radius: 8px; }
 .lg-nav {
@@ -46,19 +48,19 @@ body {
 }
 .lg-nav button {
   border: none; background: transparent; color: var(--lg-fg-secondary);
-  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.875rem;
 }
 .lg-nav button.is-active {
   background: var(--lg-bg-surface); color: var(--lg-fg-primary); font-weight: 600; box-shadow: 0 1px 3px color-mix(in srgb, var(--lg-fg-primary) 18%, transparent);
 }
-.lg-status { margin-left: auto; font-size: 12px; color: var(--lg-fg-muted); }
+.lg-status { margin-left: auto; font-size: 0.75rem; color: var(--lg-fg-muted); }
 .lg-progress { width: 96px; height: 4px; border-radius: 2px; background: var(--lg-border-subtle); overflow: hidden; }
 .lg-progress > span { display: block; height: 100%; background: var(--lg-accent); }
 /* min-width:0 + width:100% 是必需的：flex column 子项默认 min-width:auto，
    会被内容撑宽，导致 .lg-home 的 clientWidth 大于视口（实测 1700 vs 1295），
    环心因此偏移到右侧。 */
 .lg-main { position: relative; flex: 1; overflow: hidden; width: 100%; min-width: 0; }
-.lg-muted { color: var(--lg-fg-muted); font-size: 12px; }
+.lg-muted { color: var(--lg-fg-muted); font-size: 0.75rem; }
 
 .lg-btn {
   padding: 6px 12px; border-radius: 6px; cursor: pointer;
@@ -70,67 +72,110 @@ body {
 /* ── 主页转盘（docs/13） ── */
 .lg-home {
   position: absolute; inset: 0; overflow: hidden; isolation: isolate; touch-action: none; cursor: grab;
-  background: radial-gradient(ellipse at 48% 42%, var(--lg-bg-surface), var(--lg-bg-app) 68%);
+
 }
 /* 离开主页后仍然挂载（13 §6 保留环位置），只做视觉隐藏：
    不用 display:none —— 那会让 clientWidth 归零、返回时环先塌到中心再弹回。 */
 .lg-home.is-inactive { visibility: hidden; pointer-events: none; }
-/* 环线与书脊共用同一套 center/radius 计算（ring.ts），都用 transform 定位。 */
+.lg-home-stage {
+  isolation: isolate; display: grid; grid-template: minmax(0, 1fr) auto / minmax(0, 1fr);
+  background: radial-gradient(ellipse at 50% 39%, var(--lg-bg-surface), var(--lg-bg-app) 80%);
+}
+.lg-home-stage > .lg-home { grid-area: 1 / 1; position: relative; min-height: 0; min-width: 0; }
+.lg-home-pattern {
+  position: absolute; inset: 0; pointer-events: none; z-index: -1; overflow: hidden;
+  --plate-ground: var(--lg-bg-surface);
+  --plate-leaf: color-mix(in srgb, var(--print-ink) 18%, var(--plate-ground));
+  --plate-petal: color-mix(in srgb, var(--print-accent) 53%, var(--plate-ground));
+  color: color-mix(in srgb, var(--print-ink) 87%, var(--lg-fg-primary));
+  background: radial-gradient(ellipse at 35% 100%, color-mix(in srgb, var(--print-ink) 11%, transparent), transparent 70%),
+    linear-gradient(120deg, color-mix(in srgb, var(--print-accent) 6%, transparent), transparent 55%);
+}
+.lg-home-pattern svg {
+  display: block; width: 100%; height: 100%; stroke-linecap: round; stroke-linejoin: round;
+  mask-image: radial-gradient(ellipse 47% 62% at 50% 54%, transparent 26%, #0007 62%, black 93%);
+}
+.lg-home-stage:has(.lg-lastread) .lg-home-pattern {
+  mask-image: radial-gradient(ellipse min(46%, 25rem) 15% at 50% 99%, transparent 46%, black 100%);
+}
+[data-theme="dark"] .lg-home-pattern {
+  color: color-mix(in srgb, var(--print-ink) 32%, var(--lg-fg-primary));
+  --plate-leaf: color-mix(in srgb, var(--print-ink) 41%, var(--plate-ground));
+  --plate-petal: color-mix(in srgb, var(--print-accent) 67%, var(--plate-ground));
+}
+/* Three concentric arcs share the shelf geometry. The sweep ends just past the outer books. */
 .lg-home-ring {
-  position: absolute; left: 0; top: 0; border-radius: 50%;
-  border: 1px solid var(--lg-accent); opacity: 0.38; pointer-events: none;
-  will-change: transform;
+  position: absolute; border-radius: 50%; pointer-events: none;
+  color: color-mix(in srgb, var(--lg-accent) 53%, var(--lg-bg-app));
+  border: 1px solid currentColor;
+  mask-image: conic-gradient(transparent calc(180deg - var(--lg-arc-sweep) - 8deg),
+    black calc(180deg - var(--lg-arc-sweep) + 12deg), black calc(180deg + var(--lg-arc-sweep) - 12deg),
+    transparent calc(180deg + var(--lg-arc-sweep) + 8deg));
 }
+.lg-home-ring::before, .lg-home-ring::after {
+  content: ""; position: absolute; border-radius: 50%; border: solid currentColor;
+}
+.lg-home-ring::before { inset: 7%; border-width: 2px; opacity: .55; }
+.lg-home-ring::after { inset: 10%; border-width: 1px; opacity: .45; }
 .lg-spine {
-  position: absolute; left: 0; top: 0; padding: 0; border: none; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  padding-block: 6px; color: var(--lg-spine-fg); overflow: hidden;
-  background-color: color-mix(in srgb, var(--lg-spine-color) 76%, var(--lg-page-paper));
-  background-image: linear-gradient(90deg, rgb(0 0 0 / 16%), transparent 11%, rgb(255 255 255 / 19%) 19%, transparent 32%, transparent 92%, rgb(0 0 0 / 12%));
-  box-shadow: 0 2px 4px rgb(0 0 0 / 16%);
-  border-radius: 3px 2px 2px 3px;
-  transform-origin: center center;
+  position: absolute; left: 0; top: 0; border: 0; cursor: pointer; padding: 0;
+  display: grid; place-items: center; overflow: hidden; border-radius: 2px 3px 3px 2px;
+  --lg-book-stock: color-mix(in srgb, var(--lg-spine-color) 11%, #fff5dc);
+  color: var(--lg-spine-fg);
+  background: linear-gradient(90deg, rgb(0 0 0 / 13%), transparent 9%, rgb(255 255 255 / 17%) 13%, transparent 20%),
+    linear-gradient(var(--lg-spine-color) 0 13%, var(--lg-book-stock) 13% 87%, var(--lg-spine-color) 87% 100%);
+  box-shadow: 0 2px 4px rgb(29 27 21 / 17%), inset 0 0 0 1px rgb(20 24 20 / 10%);
+  transform-origin: center; will-change: transform;
   transition: transform var(--lg-dur-base) var(--lg-ease), opacity var(--lg-dur-base) var(--lg-ease);
-  will-change: transform;
 }
-/* docs/15 §8：dark 主题下发闷，书脊色统一提亮 12%。 */
-[data-theme="dark"] .lg-spine {
-  background-color: color-mix(in srgb, var(--lg-spine-color) 81%, var(--lg-page-paper));
-}
-.lg-spine.is-focused { outline: 2px solid var(--lg-accent); outline-offset: 3px; }
-/* D04：竖排书名，长书名按书脊长度截断加省略号。
-   不加 nowrap 的话 writing-mode: vertical-rl 会折成多列竖排，然后在书脊里被裁掉半个字。 */
+[data-theme="dark"] .lg-spine { --lg-book-stock: color-mix(in srgb, var(--lg-spine-color) 35%, #ede1c8); }
+.lg-spine.is-focused { box-shadow: 0 5px 10px -3px rgb(29 27 21 / 33%), inset 0 0 0 1px rgb(20 24 20 / 14%); }
 .lg-spine-title {
-  writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.08em;
-  display: block; max-height: 100%; max-width: 100%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: .025em;
+  font-family: var(--lg-display-font); font-weight: 600;
+  max-height: 70%; max-width: 100%; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* 下半环的 rot 已接近 180°，竖排书名会整体倒置；只翻文字、不动几何。 */
 .lg-spine-title.is-flipped { transform: rotate(180deg); }
+.lg-home[data-single] .lg-spine-title {
+  writing-mode: horizontal-tb; white-space: normal; text-align: center; overflow-wrap: anywhere;
+  margin-inline: 12%; font-size: calc(clamp(15px, 2vw, 22px) * var(--lg-ui-scale, 1)); line-height: 1.3;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+}
 .lg-home-focused {
-  position: absolute; transform: translate(-50%, -50%); text-align: center;
-  display: flex; flex-direction: column; gap: 4px; pointer-events: none;
-  max-width: min(560px, 62%); 
+  position: absolute; transform: translate(-50%, -50%); text-align: center; max-width: 85%;
+  display: grid; justify-items: center; gap: 6px;
 }
-.lg-home-focused strong {
-  font: 600 clamp(18px, 2vw, 26px)/1.42 var(--lg-display-font);
-  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
-  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+.lg-shelf-title {
+  padding: 0; border: 0; background: transparent; color: var(--lg-fg-primary); cursor: pointer;
+  font: 600 calc(clamp(22px, 3vw, 46px) * var(--lg-ui-scale, 1))/1.18 var(--lg-display-font); letter-spacing: -.025em;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere;
 }
-.lg-home-focused span { font-size: 12px; color: var(--lg-fg-secondary); }
+.lg-shelf-title:hover { color: var(--lg-accent); }
+.lg-shelf-meta { color: var(--lg-fg-secondary); font-size: 0.8125rem; line-height: 1.5; }
+.lg-shelf-nav { display: inline-flex; align-items: center; gap: 8px; margin-top: 5px; }
+.lg-shelf-nav span { font: 0.75rem/1.3 Consolas, monospace; color: var(--lg-fg-secondary); }
+.lg-shelf-nav button {
+  width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--lg-border-strong);
+  background: transparent; color: var(--lg-fg-secondary); font: 1.1875rem/1 system-ui; cursor: pointer;
+}
+.lg-shelf-nav button:hover { background: var(--lg-bg-surface); color: var(--lg-accent); border-color: var(--lg-accent); }
+.lg-empty-volumes { display: flex; gap: 3px; height: 60px; align-items: end; }
+.lg-empty-volumes i { width: 13px; height: 88%; border-block: 7px solid var(--lg-accent); background: var(--lg-border-subtle); }
+.lg-empty-volumes i:nth-child(2) { height: 100%; }
+.lg-empty-volumes i:last-child { transform: rotate(-12deg); transform-origin: bottom left; margin-left: 9px; }
 .lg-home-empty { display: flex; align-items: center; justify-content: center; cursor: default; }
 .lg-home-empty-card {
   text-align: center; display: grid; justify-items: center; gap: 20px; padding: 32px;
 }
 .lg-home-empty-card p {
-  margin: 0; color: var(--lg-fg-primary); font: 600 27px/1.4 var(--lg-display-font);
+  margin: 0; color: var(--lg-fg-primary); font: 600 1.6875rem/1.4 var(--lg-display-font);
 }
 
 /* ── 文献库（安静克制的列表：极淡斑马 + 悬停，不加卡片阴影） ── */
 .lg-library { position: absolute; inset: 0; padding: 20px 24px; overflow: auto; background: var(--lg-bg-app); }
 .lg-library-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
 .lg-filter {
-  flex: 1; min-width: 140px; max-width: 320px; padding: 6px 10px; font-size: 13px;
+  flex: 1; min-width: 140px; max-width: 320px; padding: 6px 10px; font-size: 0.8125rem;
   border: 1px solid var(--lg-border-strong); border-radius: 6px;
   background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
@@ -140,17 +185,17 @@ body {
   width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 84px 92px; gap: 16px;
   align-items: baseline; text-align: left;
   padding: 9px 12px; border: none; background: transparent; color: inherit;
-  cursor: pointer; border-radius: 6px; font-size: 14px;
+  cursor: pointer; border-radius: 6px; font-size: 0.875rem;
 }
 .lg-doc-list button:hover { background: var(--lg-bg-surface); }
-.lg-doc-title { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lg-doc-meta { font-size: 12px; color: var(--lg-fg-muted); text-align: right; }
+.lg-doc-title { font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-doc-meta { font-size: 0.75rem; color: var(--lg-fg-muted); text-align: right; }
 
 /* ── 文献库（库根）管理：安静的两行式列表，操作按钮指到行上才显色 ── */
 .lg-roots { margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--lg-border-subtle); }
 .lg-roots-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .lg-roots-head h2 {
-  margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  margin: 0; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--lg-fg-muted);
 }
 .lg-roots-empty { margin: 4px 0 0 12px; }
@@ -160,28 +205,28 @@ body {
   gap: 14px; align-items: center; padding: 6px 12px; border-radius: 6px;
 }
 .lg-root-list li:hover { background: var(--lg-bg-surface); }
-.lg-root-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lg-root-path { font-size: 12px; color: var(--lg-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-root-name { font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-root-path { font-size: 0.75rem; color: var(--lg-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lg-root-actions { display: flex; gap: 2px; opacity: 0.3; transition: opacity var(--lg-dur-fast) var(--lg-ease); }
 .lg-root-list li:hover .lg-root-actions,
 .lg-root-list li:focus-within .lg-root-actions { opacity: 1; }
 .lg-doc-action {
   border: 1px solid transparent; background: transparent; color: var(--lg-fg-secondary);
-  cursor: pointer; font-size: 12px; padding: 3px 8px; border-radius: 6px;
+  cursor: pointer; font-size: 0.75rem; padding: 3px 8px; border-radius: 6px;
 }
 .lg-doc-action:hover { border-color: var(--lg-border-strong); color: var(--lg-fg-primary); background: var(--lg-bg-elevated); }
 
 /* 应用内浮层里的行内表单（docs/16 §5：不用系统原生弹窗） */
 .lg-dialog { display: flex; flex-direction: column; gap: 12px; margin-top: 18vh; }
-.lg-dialog-title { margin: 0; font-size: 15px; font-weight: 600; }
+.lg-dialog-title { margin: 0; font-size: 0.9375rem; font-weight: 600; }
 .lg-dialog-sub { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lg-dialog-body { margin: 0; font-size: 13px; color: var(--lg-fg-secondary); line-height: 1.6; }
-.lg-dialog-error { margin: 0; font-size: 12px; color: var(--lg-fg-primary); }
+.lg-dialog-body { margin: 0; font-size: 0.8125rem; color: var(--lg-fg-secondary); line-height: 1.6; }
+.lg-dialog-error { margin: 0; font-size: 0.75rem; color: var(--lg-fg-primary); }
 .lg-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
 .lg-field { display: flex; flex-direction: column; gap: 4px; }
-.lg-field-label { font-size: 12px; color: var(--lg-fg-muted); }
+.lg-field-label { font-size: 0.75rem; color: var(--lg-fg-muted); }
 .lg-field-input {
-  padding: 7px 10px; font-size: 14px; border-radius: 6px;
+  padding: 7px 10px; font-size: 0.875rem; border-radius: 6px;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
 
@@ -196,12 +241,12 @@ body {
 .lg-bookmark-go {
   flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
   background: none; border: 0; padding: 4px 0; cursor: pointer; text-align: left;
-  color: var(--lg-fg-primary); font-size: 13px;
+  color: var(--lg-fg-primary); font-size: 0.8125rem;
 }
 .lg-bookmark-title { font-variant-numeric: tabular-nums; }
-.lg-bookmark-note { font-size: 11px; color: var(--lg-fg-muted); }
+.lg-bookmark-note { font-size: 0.6875rem; color: var(--lg-fg-muted); }
 .lg-bookmark-input {
-  flex: 1; min-width: 90px; padding: 4px 8px; font-size: 12px;
+  flex: 1; min-width: 90px; padding: 4px 8px; font-size: 0.75rem;
   border: 1px solid var(--lg-border-strong); border-radius: 6px;
   background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
@@ -242,7 +287,7 @@ body {
 .lg-page-placeholder {
   position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
   align-items: center; justify-content: center;
-  background: var(--lg-bg-surface); color: var(--lg-fg-muted); font-size: 12px;
+  background: var(--lg-bg-surface); color: var(--lg-fg-muted); font-size: 0.75rem;
 }
 .lg-text-layer { color: transparent; z-index: 1; }
 .lg-highlight-layer { z-index: 2; }
@@ -253,12 +298,12 @@ body {
   border-radius: 13px; border: 1px solid var(--lg-panel-edge); background: var(--lg-panel-fill); box-shadow: var(--lg-panel-shadow);
 }
 .lg-docsearch input {
-  flex: 1 1 150px; min-width: 0; max-width: none; padding: 6px 8px; font-size: 13px;
+  flex: 1 1 150px; min-width: 0; max-width: none; padding: 6px 8px; font-size: 0.8125rem;
   border: 1px solid var(--lg-border-strong); border-radius: 6px;
   background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
 .lg-docsearch-list { list-style: none; display: flex; gap: 6px; margin: 0; padding: 0; overflow-x: auto; width: 100%; padding-top: 4px; border-top: 1px solid var(--lg-border-subtle); }
-.lg-docsearch-list button { white-space: nowrap; border: 1px solid var(--lg-border-subtle); background: var(--lg-bg-surface); color: var(--lg-fg-secondary); border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
+.lg-docsearch-list button { white-space: nowrap; border: 1px solid var(--lg-border-subtle); background: var(--lg-bg-surface); color: var(--lg-fg-secondary); border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 0.75rem; }
 .lg-docsearch-list button.is-active { border-color: var(--lg-accent); color: var(--lg-fg-primary); }
 /* 阅读控件放在视口边缘，只在需要时展开面板。 */
 .lg-reader-dock, .lg-reader-back {
@@ -269,7 +314,7 @@ body {
 .lg-reader-dock { left: 50%; bottom: 16px; transform: translateX(-50%); gap: 2px; padding: 4px; border-radius: 16px; }
 .lg-reader-dock button, .lg-reader-back {
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
-  font: inherit; font-size: 13px; min-height: 34px; border-radius: 11px;
+  font: inherit; font-size: 0.8125rem; min-height: 34px; border-radius: 11px;
 }
 .lg-reader-dock button { min-width: 34px; border: 0; background: transparent; color: inherit; }
 .lg-reader-dock button:hover:enabled, .lg-reader-dock button[aria-expanded="true"] { background: var(--lg-bg-app); color: var(--lg-accent); }
@@ -287,45 +332,45 @@ body {
   width: min(284px, calc(100vw - 16px)); max-height: calc(100dvh - 80px); overflow-y: auto;
   padding: 9px; border-radius: 15px; background: var(--lg-bg-elevated);
   border: 1px solid var(--lg-panel-edge); box-shadow: var(--lg-panel-shadow);
-  display: flex; flex-direction: column; gap: 2px; font-size: 13px;
+  display: flex; flex-direction: column; gap: 2px; font-size: 0.8125rem;
 }
 .lg-reader-menu-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; }
-.lg-reader-menu-label { margin-right: auto; font-size: 12px; color: var(--lg-fg-muted); }
+.lg-reader-menu-label { margin-right: auto; font-size: 0.75rem; color: var(--lg-fg-muted); }
 .lg-reader-menu-value { min-width: 46px; text-align: center; color: var(--lg-fg-secondary); font-variant-numeric: tabular-nums; }
 .lg-reader-menu-step {
   width: 26px; height: 26px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface);
-  color: var(--lg-fg-primary); font-size: 14px; line-height: 1;
+  color: var(--lg-fg-primary); font-size: 0.875rem; line-height: 1;
 }
 .lg-reader-menu-step:hover { background: var(--lg-bg-app); }
 .lg-reader-menu-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 7px 8px; border: none; border-radius: 7px; text-align: left; cursor: pointer;
-  background: transparent; color: var(--lg-fg-secondary); font-size: 13px;
+  background: transparent; color: var(--lg-fg-secondary); font-size: 0.8125rem;
 }
 .lg-reader-menu-item:hover { background: var(--lg-bg-app); color: var(--lg-fg-primary); }
 .lg-reader-menu-item kbd {
-  font: inherit; font-size: 11px; padding: 0 5px; border-radius: 4px;
+  font: inherit; font-size: 0.6875rem; padding: 0 5px; border-radius: 4px;
   border: 1px solid var(--lg-border-strong); color: var(--lg-fg-muted);
 }
 .lg-reader-menu-pair { display: flex; gap: 4px; padding: 2px 4px 4px; }
 .lg-reader-menu-fit {
   flex: 1; padding: 6px 4px; border-radius: 7px; cursor: pointer;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface);
-  color: var(--lg-fg-secondary); font-size: 12px;
+  color: var(--lg-fg-secondary); font-size: 0.75rem;
 }
 .lg-reader-menu-fit:hover { background: var(--lg-bg-app); color: var(--lg-fg-primary); }
 .lg-reader-menu-input {
-  flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; font-size: 12px;
+  flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; font-size: 0.75rem;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
 .lg-reader-menu-input::-webkit-outer-spin-button,
 .lg-reader-menu-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.lg-reader-menu-hint { margin: 2px 8px 4px; font-size: 11px; color: var(--lg-fg-muted); }
+.lg-reader-menu-hint { margin: 2px 8px 4px; font-size: 0.6875rem; color: var(--lg-fg-muted); }
 /* 阅读区临时提示（缩放百分比 / 已复制 / 已回到第 N 页）。 */
 .lg-reader-notice {
   position: fixed; left: 50%; bottom: 68px; transform: translateX(-50%); z-index: 45;
-  padding: 3px 10px; border-radius: 999px; font-size: 12px; pointer-events: none;
+  padding: 3px 10px; border-radius: 999px; font-size: 0.75rem; pointer-events: none;
   background: color-mix(in oklab, var(--lg-bg-elevated) 92%, transparent);
   border: 1px solid var(--lg-border-subtle); color: var(--lg-fg-secondary);
   font-variant-numeric: tabular-nums;
@@ -362,7 +407,7 @@ body {
   cursor: pointer; padding: 4px 0;
 }
 .lg-drawer-list li > button:first-child:hover { color: var(--lg-fg-primary); }
-.lg-icon-btn { border: none; background: transparent; color: var(--lg-fg-muted); cursor: pointer; font-size: 15px; }
+.lg-icon-btn { border: none; background: transparent; color: var(--lg-fg-muted); cursor: pointer; font-size: 0.9375rem; }
 
 /* ── 全局搜索浮层（D23：居中 720px，距顶 15vh） ── */
 .lg-overlay { position: fixed; inset: 0; background: var(--lg-scrim); display: flex; justify-content: center; z-index: 80; }
@@ -372,7 +417,7 @@ body {
   border: 1px solid var(--lg-border-subtle);
 }
 .lg-overlay-panel input {
-  width: 100%; padding: 8px 10px; font-size: 15px;
+  width: 100%; padding: 8px 10px; font-size: 0.9375rem;
   border: 1px solid var(--lg-border-strong); border-radius: 6px;
   background: var(--lg-bg-surface); color: var(--lg-fg-primary);
 }
@@ -382,32 +427,52 @@ body {
 
 /* ── 设置（分区分割清晰，控件统一走令牌） ── */
 .lg-settings { position: absolute; inset: 0; padding: 24px 28px; overflow: auto; background: var(--lg-bg-app); }
+.lg-about { position: absolute; inset: 0; overflow: auto; background: var(--lg-bg-app); padding: clamp(22px, 6vh, 64px) 20px; }
+.lg-about article {
+  max-width: 44rem; margin: 0 auto; padding: clamp(22px, 4vw, 54px);
+  background: var(--lg-bg-surface); border-block: 1px solid var(--lg-border-strong);
+}
+.lg-about header { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.lg-about header img { border-radius: 12px; }
+.lg-about h1 { margin: 0; font: 600 2.5rem/1 var(--lg-display-font); letter-spacing: -.045em; }
+.lg-about header span { margin-left: auto; font-size: .8125rem; color: var(--lg-fg-secondary); }
+.lg-about-intro { margin: 18px 0 28px; font: 1.1875rem/1.6 var(--lg-display-font); }
+.lg-about dl { display: grid; grid-template-columns: max-content 1fr; gap: 22px 28px; margin: 0; padding-top: 24px; border-top: 1px solid var(--lg-border-subtle); }
+.lg-about dt { color: var(--lg-fg-primary); font-weight: 600; }
+.lg-about dl { font-size: .875rem; line-height: 1.75; }
+.lg-about dd { margin: 0; color: var(--lg-fg-secondary); }
+.lg-about a { color: var(--lg-accent); text-underline-offset: 3px; }
+.lg-project-link { display: flex; align-items: center; gap: 8px; width: fit-content; margin-top: 8px; font-weight: 600; }
+@media (max-width: 600px) {
+  .lg-about dl { grid-template-columns: 1fr; gap: 4px; }
+  .lg-about dd + dt { margin-top: 12px; }
+}
 .lg-settings-section { padding: 14px 0 20px; border-bottom: 1px solid var(--lg-border-subtle); }
 .lg-settings-section:last-child { border-bottom: none; }
 .lg-settings-section h2 {
-  margin: 0 0 10px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
+  margin: 0 0 10px; font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--lg-fg-muted);
 }
-.lg-row { display: flex; align-items: center; gap: 16px; padding: 7px 0; font-size: 14px; }
+.lg-row { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 7px 0; font-size: 0.875rem; }
 .lg-row-label { min-width: 108px; color: var(--lg-fg-secondary); }
-.lg-theme-choices { display: flex; gap: 6px; }
+.lg-theme-choices { display: flex; flex-wrap: wrap; gap: 6px; }
 .lg-theme-choices button {
   padding: 4px 12px; border-radius: 6px; border: 1px solid var(--lg-border-strong);
-  background: var(--lg-bg-surface); color: var(--lg-fg-secondary); cursor: pointer; font-size: 13px;
+  background: var(--lg-bg-surface); color: var(--lg-fg-secondary); cursor: pointer; font-size: 0.8125rem;
 }
 .lg-theme-choices button.is-active { border-color: var(--lg-accent); color: var(--lg-fg-primary); font-weight: 600; }
 .lg-keymap-group { margin-bottom: 14px; }
 .lg-keymap-group:last-child { margin-bottom: 0; }
 .lg-keymap-group h3 {
-  margin: 0 0 6px; font-size: 12px; font-weight: 600;
+  margin: 0 0 6px; font-size: 0.75rem; font-weight: 600;
   color: var(--lg-fg-secondary); letter-spacing: 0.04em;
 }
 .lg-keymap { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.lg-keymap li { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--lg-fg-secondary); }
+.lg-keymap li { display: flex; align-items: center; gap: 6px; font-size: 0.8125rem; color: var(--lg-fg-secondary); }
 .lg-keymap li > span:first-of-type { margin-left: 10px; }
-.lg-keymap-note { margin-left: 8px; font-size: 11px; color: var(--lg-fg-muted); }
+.lg-keymap-note { margin-left: 8px; font-size: 0.6875rem; color: var(--lg-fg-muted); }
 .lg-keymap kbd {
-  font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px;
+  font: inherit; font-size: 0.75rem; padding: 1px 6px; border-radius: 4px;
   border: 1px solid var(--lg-border-strong); background: var(--lg-bg-surface); color: var(--lg-fg-secondary);
 }
 .lg-boot { padding: 40px; text-align: center; color: var(--lg-fg-muted); }
@@ -462,55 +527,48 @@ body {
   border-right: 1px solid var(--lg-border-subtle); max-height: calc(100vh - 220px); overflow: auto;
 }
 .lg-tree-head {
-  margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  margin: 0 0 6px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--lg-fg-muted);
 }
 .lg-tree-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 .lg-tree-row {
   width: 100%; display: flex; align-items: center; gap: 6px;
   padding: 5px 8px; border: none; border-radius: 6px; cursor: pointer; text-align: left;
-  background: transparent; color: var(--lg-fg-secondary); font-size: 13px;
+  background: transparent; color: var(--lg-fg-secondary); font-size: 0.8125rem;
 }
 .lg-tree-row:hover { background: var(--lg-bg-surface); color: var(--lg-fg-primary); }
 .lg-tree-row.is-active {
   background: color-mix(in oklab, var(--lg-accent) 14%, transparent);
   color: var(--lg-fg-primary); font-weight: 600;
 }
-.lg-tree-caret { width: 11px; flex: none; color: var(--lg-fg-muted); font-size: 10px; }
+.lg-tree-caret { width: 11px; flex: none; color: var(--lg-fg-muted); font-size: 0.625rem; }
 .lg-tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lg-tree-count { flex: none; font-size: 11px; color: var(--lg-fg-muted); font-variant-numeric: tabular-nums; }
+.lg-tree-count { flex: none; font-size: 0.6875rem; color: var(--lg-fg-muted); font-variant-numeric: tabular-nums; }
 .lg-library-list { min-width: 0; }
 .lg-library-list-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.lg-library-list-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
-.lg-library-empty { margin: 12px 0 0; font-size: 13px; color: var(--lg-fg-muted); }
+.lg-library-list-head h2 { margin: 0; font-size: 0.875rem; font-weight: 600; }
+.lg-library-empty { margin: 12px 0 0; font-size: 0.8125rem; color: var(--lg-fg-muted); }
 
-/* ── 上次阅读（v0.11 需求 5）：主页左上角一张轻卡片，不参与转盘几何。 ── */
 .lg-lastread {
-  position: absolute; left: clamp(16px, 3vw, 44px); top: clamp(16px, 3vh, 32px); z-index: 5;
-  display: flex; flex-direction: column; gap: 9px; width: min(304px, 39vw); padding: 18px 20px;
-  border-radius: 4px 14px 14px 4px; border: 1px solid var(--lg-panel-edge); border-left: 3px solid var(--lg-accent);
-  background: var(--lg-panel-fill); box-shadow: var(--lg-page-shadow);
+  grid-area: 2 / 1; justify-self: center; align-self: end;
+  width: min(35rem, 72%); margin: 0 0 clamp(12px, 3.2vh, 36px);
+  padding: 10px 2px 0; display: grid; align-items: center;
+  grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 16px;
+  border-top: 1px solid var(--lg-border-strong);
 }
-.lg-lastread-head {
-  font-size: 12px; font-weight: 600; letter-spacing: 0.12em; color: var(--lg-accent);
-}
+.lg-lastread-head { grid-area: 1 / 1; font-size: .75rem; font-weight: 600; letter-spacing: .08em; color: var(--lg-accent); }
 .lg-lastread-title {
-  font: 600 19px/1.45 var(--lg-display-font); overflow: hidden; display: -webkit-box;
-  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  grid-area: 1 / 2; font: 600 1.06rem/1.4 var(--lg-display-font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.lg-lastread-meta { font-size: 12px; color: var(--lg-fg-secondary); }
-.lg-lastread-actions { display: flex; gap: 6px; margin-top: 2px; }
-.lg-lastread-actions .lg-btn { padding: 4px 10px; font-size: 12px; }
-
+.lg-lastread-meta { grid-area: 2 / 2; color: var(--lg-fg-secondary); font-size: .75rem; }
+.lg-lastread-actions { grid-area: 1 / 3 / span 2; }
+.lg-lastread-actions .lg-btn { font-size: .8125rem; }
 button, input, select { font-family: inherit; }
 :focus-visible { outline: 2px solid var(--lg-accent); outline-offset: 2px; }
 .lg-nav button:hover:not(.is-active), .lg-btn:hover:enabled:not(.lg-btn-primary) { background: var(--lg-bg-app); }
 .lg-btn-primary:hover:enabled { background: color-mix(in srgb, var(--lg-accent) 91%, var(--lg-fg-primary)); }
 .lg-btn { border-radius: 8px; min-height: 30px; }
-.lg-spine::before, .lg-spine::after { content: ""; position: absolute; inset-inline: 3px; height: 1px; background: color-mix(in srgb, var(--lg-spine-fg) 24%, transparent); pointer-events: none; }
-.lg-spine::before { top: 3px; }
-.lg-spine::after { bottom: 3px; }
-.lg-lastread-progress { appearance: none; height: 3px; width: 100%; border: 0; }
+.lg-lastread-progress { grid-area: 2 / 1; align-self: center; appearance: none; height: 3px; width: 100%; border: 0; }
 .lg-lastread-progress::-webkit-progress-bar { background: var(--lg-border-subtle); border-radius: 3px; }
 .lg-lastread-progress::-webkit-progress-value { background: var(--lg-accent); border-radius: 3px; }
 .lg-reader-performance { border-top: 1px solid var(--lg-border-subtle); padding-top: 3px; }
@@ -525,10 +583,15 @@ button, input, select { font-family: inherit; }
 .lg-drawer-head { padding: 3px 2px 10px; border-bottom: 1px solid var(--lg-border-subtle); }
 .lg-overlay-panel { align-self: flex-start; border-radius: 14px; }
 .lg-library-toolbar { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .lg-lastread { width: min(38rem, 88%); gap: 4px 10px; }
+  .lg-shelf-nav { margin-top: 0; }
+  .lg-shelf-meta { font-size: 0.75rem; }
+}
 @media (max-width: 640px) {
   .lg-header { gap: 10px; padding-inline: 12px; flex-wrap: wrap; }
-  .lg-lastread { width: min(260px, 76vw); gap: 5px; padding: 10px 14px; }
-  .lg-brand { font-size: 21px; }
+
+  .lg-brand { font-size: 1.3125rem; }
   .lg-library-body { grid-template-columns: minmax(100px, 30%) minmax(0, 1fr); gap: 8px; }
   .lg-docsearch { width: calc(100% - 18px); top: 6px; }
   .lg-reader:has(.lg-docsearch) .lg-reader-back { top: auto; bottom: 20px; left: 8px; gap: 0; font-size: 0; }

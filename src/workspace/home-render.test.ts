@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { HomeSpace, SPINE_PALETTE, spineColorFor, spineTooltip, type HomeBook } from "./HomeSpace";
 import { maxMountedSpines } from "./ring";
+import { HomePattern } from "./HomePattern";
 
 function books(count: number): HomeBook[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -33,6 +34,12 @@ function spineCount(html: string): number {
 }
 
 describe("主页转盘真实渲染（不只测辅助函数）", () => {
+  it("同一个随机种子可重绘同一幅图，更换种子会改变构图", () => {
+    const print = (seed: number) => renderToStaticMarkup(createElement(HomePattern, { seed }));
+    expect(print(819)).toBe(print(819));
+    expect(print(819)).not.toBe(print(820));
+  });
+
   it("N=0 渲染空态，不画环、不生成书脊", () => {
     const html = render(0);
     expect(spineCount(html)).toBe(0);
@@ -41,10 +48,16 @@ describe("主页转盘真实渲染（不只测辅助函数）", () => {
     expect(html).not.toContain("lg-home-ring");
   });
 
-  it("N=1/2 各生成 1/2 个书脊，环线存在", () => {
-    expect(spineCount(render(1))).toBe(1);
-    expect(spineCount(render(2))).toBe(2);
-    expect(render(2)).toContain("lg-home-ring");
+  it("单本书独立陈列，从两本起显示弧线和翻书按钮", () => {
+    const single = render(1);
+    expect(spineCount(single)).toBe(1);
+    expect(single).not.toContain("lg-home-ring");
+    expect(single).not.toContain("浏览书架");
+    const pair = render(2);
+    expect(spineCount(pair)).toBe(2);
+    expect(pair).toContain("lg-home-ring");
+    expect(pair).toContain('aria-label="上一本"');
+    expect(pair).toContain('aria-label="下一本"');
   });
 
   it("N=16/60/98 只挂载可见槽位，隐藏槽位不生成 DOM", () => {

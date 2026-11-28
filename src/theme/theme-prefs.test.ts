@@ -5,11 +5,17 @@ import {
   THEME_SOURCE_OPTIONS,
   parsePageTone,
   parseThemeSource,
+  parseUiFontSize,
   readerToneClass,
   themeForSystem,
 } from "./theme-prefs";
 
 describe("主题设置项", () => {
+  it("界面字号接受已有档位，旧配置和无效值回到 100%", () => {
+    for (const size of [90, 100, 115, 130, 150]) expect(parseUiFontSize(String(size))).toBe(size);
+    expect(parseUiFontSize(undefined)).toBe(100);
+    expect(parseUiFontSize("0")).toBe(100);
+  });
   it("主题来源只接受 manual / system", () => {
     expect(parseThemeSource("system")).toBe("system");
     expect(parseThemeSource('"manual"')).toBe("manual");

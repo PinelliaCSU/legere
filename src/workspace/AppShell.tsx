@@ -14,9 +14,11 @@ import { ReaderView, type ReaderApi } from "../reader/ReaderView";
 import { searchPages, type DocSearchHit } from "../reader/search/doc-search";
 import { useTheme } from "../theme/ThemeProvider";
 import type { ThemeName } from "../theme/tokens";
+import { AboutPage } from "./AboutPage";
+import { HomePattern, randomPrintSeed } from "./HomePattern";
 import { HomeSpace, spineColorFor, type HomeBook } from "./HomeSpace";
 import { rootLabel } from "./library-roots";
-import { PAGE_TONE_OPTIONS, THEME_SOURCE_OPTIONS } from "../theme/theme-prefs";
+import { UI_FONT_SIZES, PAGE_TONE_OPTIONS, THEME_SOURCE_OPTIONS } from "../theme/theme-prefs";
 import { KEYMAP, keymapEntryCount } from "../settings/keymap";
 import {
   DEFAULT_MODE_OPTIONS,
@@ -80,7 +82,10 @@ export function AppShell(): ReactElement {
     setThemeSource,
     pageTone,
     setPageTone,
+    fontSize, setFontSize, homePattern, setHomePattern,
   } = useTheme();
+  const [printSeed, setPrintSeed] = useState(randomPrintSeed);
+  const redrawHomePattern = useCallback(() => setPrintSeed(randomPrintSeed()), []);
   const [documents, setDocuments] = useState<DocumentDto[]>([]);
   /// 库根列表：文献库的「更改 / 替换 / 移除」都作用在这一层（R22 / R23）。
   const [roots, setRoots] = useState<LibraryRootDto[]>([]);
@@ -220,7 +225,14 @@ export function AppShell(): ReactElement {
   const leaveReader = useCallback(() => {
     closeDocument();
     persistSetting(LAST_READ_SETTING_KEY, "");
-  }, [closeDocument, persistSetting]);
+    if (activeDocumentId !== null) {
+      void call(CMD.DOCUMENT_GET, { id: activeDocumentId }).then(updated => {
+        const refreshBook = (items: DocumentDto[]) => items.map(item => item.id === updated.id ? updated : item);
+        setAllDocs(refreshBook);
+        setDocuments(refreshBook);
+      }).catch(() => undefined);
+    }
+  }, [activeDocumentId, closeDocument, persistSetting]);
 
   // 启动续读（需求 5）：设置里还留着 reader.lastDocumentId，说明上次是「正在读书」退出的。
   // 书的记录可能已被移除，所以先用 document_get 探一次；任何失败都留在主页，不阻塞启动。
@@ -451,6 +463,7 @@ export function AppShell(): ReactElement {
             <button type="button" onClick={() => openRoute("home")} aria-current={route === "home" ? "page" : undefined} className={route === "home" ? "is-active" : ""}>主页</button>
             <button type="button" onClick={() => openRoute("library")} aria-current={route === "library" ? "page" : undefined} className={route === "library" ? "is-active" : ""}>文献库</button>
             <button type="button" onClick={() => openRoute("settings")} aria-current={route === "settings" ? "page" : undefined} className={route === "settings" ? "is-active" : ""}>设置</button>
+            <button type="button" onClick={() => openRoute("about")} aria-current={route === "about" ? "page" : undefined} className={route === "about" ? "is-active" : ""}>关于</button>
           </nav>
           {indexing !== null && indexing.total > 0 ? (
             <span className="lg-progress" title="索引进度">
@@ -463,10 +476,12 @@ export function AppShell(): ReactElement {
         </header>
       ) : null}
 
-      <main className="lg-main">
+      <main className={"lg-main" + (route === "home" ? " lg-home-stage" : "")}>
+        {route === "home" && homePattern && <HomePattern seed={printSeed} />}
         {/* 主页常驻挂载：返回时不重置环位置与焦点书（13 §6），active 负责停掉按键/滚轮。 */}
         <HomeSpace
           books={books}
+          onBookChange={homePattern ? redrawHomePattern : undefined}
           active={route === "home"}
           onOpenBook={openBook}
           onAddLibrary={() => void addLibrary()}
@@ -584,10 +599,29 @@ export function AppShell(): ReactElement {
           />
         ) : null}
 
+        {route === "about" && <AboutPage />}
+
         {route === "settings" ? (
           <section className="lg-settings">
             <section className="lg-settings-section">
               <h2>外观</h2>
+              <div className="lg-row">
+                <span className="lg-row-label" id="ui-font-label">界面字号</span>
+                <div className="lg-theme-choices" role="group" aria-labelledby="ui-font-label">
+                  {UI_FONT_SIZES.map(size => (
+                    <button key={size} type="button" aria-pressed={fontSize === size}
+                      className={fontSize === size ? "is-active" : ""} onClick={() => setFontSize(size)}>
+                      {size}%
+                    </button>
+                  ))}
+                </div>
+                <span className="lg-muted">调整菜单、书架和工具栏的文字。PDF 正文沿用阅读缩放。</span>
+              </div>
+              <div className="lg-row">
+                <label className="lg-row-label" htmlFor="home-pattern">主页花纹</label>
+                <input id="home-pattern" type="checkbox" checked={homePattern} onChange={e => setHomePattern(e.target.checked)} />
+                <span className="lg-muted">在主页切换书籍时，自动生成新的草木花纹。</span>
+              </div>
               <div className="lg-row">
                 <span className="lg-row-label">主题来源</span>
                 <div className="lg-theme-choices">

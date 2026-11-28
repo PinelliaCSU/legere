@@ -87,6 +87,23 @@ fn build_main_window(
         // v0.11 程序图标：exe 的文件/窗口图标由 tauri-build 在编译期从
         // icons/icon.ico（源自 design_pictures/legereicon.png）嵌入 Windows 资源段，
         // 窗口因此继承进程图标；无需运行期解码 PNG，也就不引入 image 依赖。
+        #[cfg(windows)]
+        {
+            builder = builder.on_new_window(|url, _| {
+                use windows::core::{w, HSTRING};
+                use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+                if matches!(url.as_str(), "https://github.com/PinelliaCSU/legere" | "https://github.com/kevinraymond/florilegium") {
+                    let address = HSTRING::from(url.as_str());
+                    // Both links on the about page open in the registered system browser.
+                    let result = unsafe { ShellExecuteW(None, w!("open"), &address, None, None, SW_SHOWNORMAL) };
+                    if result.0 as isize <= 32 {
+                        tracing::warn!(?url, "系统浏览器打开失败");
+                    }
+                }
+                tauri::webview::NewWindowResponse::Deny
+            });
+        }
         if let Some(dir) = &dir {
             std::fs::create_dir_all(dir).ok();
             builder = builder.data_directory(dir.clone());

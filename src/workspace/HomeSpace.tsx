@@ -25,14 +25,14 @@ export interface HomeBook {
 
 /// D13：8 色预设（docs/15 §8）。
 export const SPINE_PALETTE = [
-  "#9AA47A",
-  "#8FA083",
-  "#9B6B4A",
-  "#C9B37A",
-  "#8E86A5",
-  "#A8B49B",
-  "#A9714B",
-  "#9FB08C",
+  "#466958",
+  "#AD5538",
+  "#597487",
+  "#AE813B",
+  "#786681",
+  "#788453",
+  "#975F50",
+  "#528383",
 ] as const;
 
 /// 书脊悬停 tooltip（docs/16 §6「书脊悬停 tooltip（A4 已定）」）：
@@ -56,6 +56,7 @@ export function spineColorFor(documentId: number): string {
 
 interface HomeSpaceProps {
   books: HomeBook[];
+  onBookChange?: () => void;
   onOpenBook: (documentId: number) => void;
   onAddLibrary: () => void;
   /// 是否处于主页路由：false 时禁用滚轮 / 拖拽 / 键盘，避免与阅读器抢按键。
@@ -65,7 +66,7 @@ interface HomeSpaceProps {
 const FOCUS_RAD = Math.PI / 2;
 const DRAG_STEP_PX = 40;
 
-export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: HomeSpaceProps): ReactElement {
+export function HomeSpace({ books, onBookChange, onOpenBook, onAddLibrary, active = true }: HomeSpaceProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 1280, height: 800 });
   const [windowStart, setWindowStart] = useState(0);
@@ -98,10 +99,11 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
 
   const rotate = useCallback(
     (dir: 1 | -1) => {
-      if (total === 0) return;
+      if (total < 2) return;
       setWindowStart((value) => value + dir);
+      onBookChange?.();
     },
-    [total],
+    [total, onBookChange],
   );
 
   // 滚轮 = 旋转转盘（D09）。必须用非被动原生监听：React 的 onWheel 是 passive，
@@ -130,7 +132,7 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         rotate(-1);
-      } else if (event.key === "Enter") {
+      } else if (event.key === "Enter" && !(target instanceof Element && target.closest("button, a, summary"))) {
         const book = books[start];
         if (book !== undefined) onOpenBook(book.documentId);
       }
@@ -140,17 +142,19 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
   }, [active, books, onOpenBook, rotate, start, total]);
 
   // 拖拽：横向位移超过阈值才切一格，且不吞掉点击（D09 同轴）。
-  const dragRef = useRef<{ x: number; moved: boolean } | null>(null);
+  const dragged = useRef(false);
+  const dragRef = useRef<{ x: number } | null>(null);
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!active) return;
-    dragRef.current = { x: event.clientX, moved: false };
+    dragged.current = false;
+    if (!active || (event.target instanceof Element && event.target.closest(".lg-home-focused"))) return;
+    dragRef.current = { x: event.clientX };
   };
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (drag === null || !active) return;
     const dx = event.clientX - drag.x;
     if (Math.abs(dx) < DRAG_STEP_PX) return;
-    drag.moved = true;
+    dragged.current = true;
     drag.x = event.clientX;
     rotate(dx > 0 ? -1 : 1);
   };
@@ -160,8 +164,9 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
 
   if (total === 0) {
     return (
-      <div className="lg-home lg-home-empty" ref={hostRef}>
+      <div className={"lg-home lg-home-empty" + (active ? "" : " is-inactive")} ref={hostRef}>
         <div className="lg-home-empty-card">
+          <span className="lg-empty-volumes" aria-hidden="true"><i /><i /><i /></span>
           <p>还没有文献</p>
           <button type="button" className="lg-btn lg-btn-primary" onClick={onAddLibrary}>
             添加文献库
@@ -172,6 +177,10 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
   }
 
   const focused = books[start];
+  const single = total === 1;
+  const bookHeight = single ? Math.min(168, size.height * 0.34) : Math.max(spineLength, Math.min(104, size.height * 0.21));
+  const bookWidth = single ? bookHeight * 0.70 : Math.min(38, Math.max(RING.spineWidthPx, center.radius * 0.15));
+  const arcSweep = Math.max(...spines.map(spine => Math.abs(spine.angle - FOCUS_RAD))) * 180 / Math.PI + 18;
   // D11：环心下方只展示焦点书一条（书名 + 作者 + 读到第 x / y 页），不常驻堆叠。
   const metaParts: string[] = [];
   if (focused?.author) metaParts.push(focused.author);
@@ -184,23 +193,28 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
     <div
       className={"lg-home" + (active ? "" : " is-inactive")}
       ref={hostRef}
+      data-single={single || undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerLeave={onPointerUp}
     >
-      <div
-        className="lg-home-ring"
-        style={{
+      {!single && (
+        <div className="lg-home-ring" aria-hidden="true" style={{
           width: center.radius * 2,
           height: center.radius * 2,
-          transform: "translate3d(" + (center.cx - center.radius) + "px," + (center.cy - center.radius) + "px,0)",
-        }}
-      />
+          left: center.cx - center.radius,
+          top: center.cy - center.radius,
+          "--lg-arc-sweep": arcSweep + "deg",
+        } as CSSProperties} />
+      )}
       {spines.map((spine: RingSpine) => {
         const book = books[((start + spine.bookOffset) % total + total) % total];
         if (book === undefined) return null;
-        const isFocused = spine.bookOffset === 0 && total !== 2;
+        const isFocused = spine.bookOffset === 0;
+        const pull = isFocused && !single ? Math.min(12, center.radius * 0.055) : 0;
+        const x = spine.left + (RING.spineWidthPx - bookWidth) / 2 + Math.cos(spine.angle) * pull;
+        const y = spine.top + (spineLength - bookHeight) / 2 + Math.sin(spine.angle) * pull - (single ? 22 : 0);
         return (
           <button
             key={book.documentId}
@@ -210,19 +224,20 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
             data-document-id={book.documentId}
             className={"lg-spine" + (isFocused ? " is-focused" : "")}
             title={spineTooltip(book)}
+            aria-label={"打开《" + book.title + "》"}
             tabIndex={-1}
-            onClick={() => onOpenBook(book.documentId)}
+            onClick={event => { if (!event.detail || !dragged.current) onOpenBook(book.documentId); }}
             style={
               {
-                width: RING.spineWidthPx,
-                height: spineLength,
+                width: bookWidth,
+                height: bookHeight,
                 // docs/15 §8：dark 主题要把书脊色提亮 12%，所以颜色走 CSS 变量而不是内联 background。
                 "--lg-spine-color": book.spineColor,
                 zIndex: spine.zIndex,
                 opacity: spine.opacity,
-                fontSize: spine.fontSize,
+                fontSize: spine.fontSize / 16 + "rem",
                 transform:
-                  "translate3d(" + spine.left + "px," + spine.top + "px,0) rotate(" + spine.rotationDeg + "deg) scale(" + spine.scale + ")",
+                  "translate3d(" + x + "px," + y + "px,0) rotate(" + spine.rotationDeg + "deg) scale(" + spine.scale + ")",
               } as CSSProperties
             }
           >
@@ -231,9 +246,21 @@ export function HomeSpace({ books, onOpenBook, onAddLibrary, active = true }: Ho
         );
       })}
       {focused !== undefined ? (
-        <div className="lg-home-focused" style={{ left: center.cx, top: center.cy, width: center.radius * 1.36 }}>
-          <strong>{focused.title}</strong>
-          {meta === "" ? null : <span>{meta}</span>}
+        <div className="lg-home-focused" style={{
+          left: center.cx,
+          top: center.cy + (single ? bookHeight / 2 + 28 : -center.radius * 0.06),
+          width: single ? Math.min(420, size.width * 0.80) : center.radius * 1.50,
+        }}>
+          <button type="button" className="lg-shelf-title" title={"打开《" + focused.title + "》"}
+            onClick={() => onOpenBook(focused.documentId)}>{focused.title}</button>
+          {meta === "" ? null : <span className="lg-shelf-meta">{meta}</span>}
+          {!single && (
+            <div className="lg-shelf-nav" role="group" aria-label="浏览书架">
+              <button type="button" aria-label="上一本" title="上一本" onClick={() => rotate(-1)}>‹</button>
+              <span>{String(start + 1).padStart(2, "0")} / {String(total).padStart(2, "0")}</span>
+              <button type="button" aria-label="下一本" title="下一本" onClick={() => rotate(1)}>›</button>
+            </div>
+          )}
         </div>
       ) : null}
     </div>

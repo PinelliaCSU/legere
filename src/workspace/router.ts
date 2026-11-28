@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 
-export type Route = "home" | "library" | "reader" | "settings";
+export type Route = "home" | "library" | "reader" | "settings" | "about";
 
 interface AppState {
   route: Route;
